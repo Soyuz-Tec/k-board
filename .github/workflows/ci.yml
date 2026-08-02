@@ -77,6 +77,22 @@ jobs:
       - name: Exhaustive convergence suite
         run: cargo test -p kboard-core --test convergence -- --nocapture
 
+  msrv:
+    name: minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The manifest declares rust-version = 1.85. An undeclared bump is a
+      # breaking change for hosts pinned to an older toolchain, so it is
+      # verified rather than asserted.
+      - uses: dtolnay/rust-toolchain@1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build at MSRV
+        run: cargo build --workspace --all-targets
+
   e2e:
     name: end-to-end convergence
     runs-on: ubuntu-latest

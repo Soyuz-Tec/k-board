@@ -100,6 +100,10 @@ impl std::fmt::Display for BoardError {
     }
 }
 
+// Public API: callers must be able to put this in a `Box<dyn Error>` or a
+// `?` chain like any other error type.
+impl std::error::Error for BoardError {}
+
 /// A live board: the document, this replica's clock, and the operations that
 /// have not yet been broadcast.
 pub struct Board {

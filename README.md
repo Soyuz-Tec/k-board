@@ -127,6 +127,8 @@ happened to try is not a CRDT.
 | Tenant isolation | Cross-scope merge is refused and does not partially apply |
 | Wire stability | Documents and op logs round-trip through JSON, including custom keys |
 | End to end | Two live replicas over WebSocket converge with both concurrent edits intact |
+| Refusal atomicity | An over-limit batch is rejected whole and never partially applied |
+| Abuse resistance | Scope charset rejects traversal and injection; rate limiter throttles bursts and disconnects floods |
 
 ## Accessibility
 
@@ -150,9 +152,15 @@ pixels to be painting for content to be readable.
 - Browser client: shapes, freehand, select/move, erase, pan, zoom, colours
 - Local-first queueing — draw offline, reconnect, replay
 - DOM accessibility mirror
-- CI: fmt, clippy, tests, wasm build, convergence proofs, e2e, audit
+- Server hardening: rate limiting, frame/batch caps, room bounds, idle
+  reclamation, scope validation, security headers
+- Architecture decision records
+- CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit
 
 **Next**
+- Durable persistence behind `OpLog`/`SnapshotStore` — the top gap
+- Undo/redo (cheap here: rewrite the prior value with a fresh stamp)
+- Authentication in the standalone server
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Headless renderer (`lyon` → `resvg`) for server-side SVG/PNG
 - GPU renderer (`wgpu`/`vello`) with a WebGL2 fallback
@@ -168,10 +176,22 @@ pixels to be painting for content to be readable.
 
 ## Not production
 
-- Rooms are in memory; restarting the server loses boards.
-- `authorize()` in `kboard-server` returns `true` for everyone. It is marked as
-  the seam where a real deployment authenticates.
-- No rate limiting, no payload caps at the server edge.
+- **`authorize()` in `kboard-server` returns `true` for everyone.** It is marked
+  as the seam where a real deployment authenticates. This is the single reason
+  the server cannot face a public network.
+- **Rooms are in memory.** Restarting the server loses every board.
+
+Resource limits *are* enforced — frame size, frame rate, operations per batch,
+elements per room, room count, scope charset and length, and idle-room
+reclamation. See [ADR-0006](docs/adr/0006-server-resource-limits.md) for the
+values and why each exists. That closes the denial-of-service routes; it does
+not substitute for authentication.
+
+## Decisions
+
+Non-obvious choices are recorded in [`docs/adr/`](docs/adr/README.md) — including
+why conflicts resolve per property, why there is no `Clear` operation, why the
+FFI is a raw C ABI, and why rooms no longer hold an operation log.
 
 ## Licence
 

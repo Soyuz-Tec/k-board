@@ -10,9 +10,14 @@
 //! sockets, conversation membership instead of the actor allocator below,
 //! Postgres instead of the in-memory rooms.
 //!
-//! Not production: rooms are in memory and every connection is admitted. See
-//! `authorize` for exactly where a real deployment plugs in.
+//! ## Posture
+//!
+//! Resource limits are enforced (see [`limits`]) so an unauthenticated peer
+//! cannot exhaust the process. **Authentication is still absent** —
+//! [`authorize`] admits everyone. Until that changes this is safe to run on a
+//! trusted network and nowhere else.
 
+mod limits;
 mod room;
 
 use std::collections::HashMap;
@@ -20,21 +25,25 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::error::RecvError;
 use tower_http::services::{ServeDir, ServeFile};
 
 use kboard_core::document::{Document, ScopeId};
 use kboard_core::op::StampedOp;
 
-use crate::room::Room;
+use crate::limits::RateLimiter;
+use crate::room::{Refused, Room};
 
 #[derive(Clone)]
 struct AppState {
@@ -46,15 +55,30 @@ struct AppState {
 }
 
 impl AppState {
-    fn with_room<T>(&self, scope: &str, action: impl FnOnce(&mut Room) -> T) -> T {
-        let mut rooms = self
-            .rooms
+    fn lock_rooms(&self) -> std::sync::MutexGuard<'_, HashMap<String, Room>> {
+        self.rooms
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Access a room, creating it if capacity allows.
+    ///
+    /// Returns `None` when the room cap is reached. Rooms are minted from URL
+    /// paths, so without a cap any visitor can allocate unbounded state.
+    fn with_room<T>(&self, scope: &str, action: impl FnOnce(&mut Room) -> T) -> Option<T> {
+        let mut rooms = self.lock_rooms();
+        if !rooms.contains_key(scope) && rooms.len() >= limits::MAX_ROOMS {
+            return None;
+        }
         let room = rooms
             .entry(scope.to_owned())
             .or_insert_with(|| Room::new(ScopeId::new(scope)));
-        action(room)
+        Some(action(room))
+    }
+
+    /// Access a room only if it already exists — never creates one.
+    fn with_existing<T>(&self, scope: &str, action: impl FnOnce(&mut Room) -> T) -> Option<T> {
+        self.lock_rooms().get_mut(scope).map(action)
     }
 }
 
@@ -64,7 +88,7 @@ impl AppState {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMessage<'a> {
     /// Sent once on join: the actor id this connection must stamp with, and the
-    /// materialised document. Never the raw history — it may be truncated.
+    /// materialised document.
     Init {
         actor: u64,
         doc: &'a Document,
@@ -88,6 +112,9 @@ enum ClientMessage {
 /// this entire binary with its own membership check and never reaches this
 /// function. The engine itself has no opinion either way — which is what lets
 /// both arrangements exist.
+///
+/// It currently admits everyone. That is the single reason this server is not
+/// production-ready, and it is deliberately one function so it stays obvious.
 fn authorize(_scope: &str) -> bool {
     true
 }
@@ -111,6 +138,8 @@ async fn main() {
         wasm_path,
     };
 
+    spawn_room_sweeper(state.clone());
+
     let static_files =
         ServeDir::new(&web_root).not_found_service(ServeFile::new(web_root.join("index.html")));
 
@@ -120,6 +149,7 @@ async fn main() {
         .route("/health", get(|| async { "ok" }))
         .route("/api/rooms/{scope}/stats", get(room_stats))
         .fallback_service(static_files)
+        .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
     let address = SocketAddr::from(([127, 0, 0, 1], port));
@@ -133,6 +163,7 @@ async fn main() {
 
     println!("k-board server listening on http://{address}");
     println!("  open http://{address}/ in two tabs to see convergence");
+    println!("  WARNING: no authentication — trusted networks only");
 
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
@@ -145,6 +176,65 @@ async fn main() {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nk-board: shutting down");
+}
+
+/// Reclaim rooms nobody is connected to that have been quiet.
+///
+/// Without this, a room created by a single visit is retained for the process
+/// lifetime. Combined with the room cap that turns a slow leak into an eventual
+/// hard refusal, which is worse than reclaiming.
+fn spawn_room_sweeper(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(limits::SWEEP_INTERVAL);
+        ticker.tick().await; // the first tick fires immediately
+        loop {
+            ticker.tick().await;
+            let now = Instant::now();
+            let mut rooms = state.lock_rooms();
+            let before = rooms.len();
+            rooms.retain(|_, room| !room.is_reclaimable(now));
+            let reclaimed = before - rooms.len();
+            if reclaimed > 0 {
+                println!(
+                    "k-board: reclaimed {reclaimed} idle room(s), {} remain",
+                    rooms.len()
+                );
+            }
+        }
+    });
+}
+
+/// Conservative defaults for a page that loads wasm and opens a WebSocket.
+///
+/// `frame-ancestors 'none'` blocks embedding this *demo* server in an iframe.
+/// A host embedding the canvas serves the client itself and sets its own policy;
+/// nothing here should make that decision for them.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; \
+             script-src 'self' 'wasm-unsafe-eval'; \
+             style-src 'self'; \
+             img-src 'self' data:; \
+             connect-src 'self' ws: wss:; \
+             base-uri 'none'; \
+             object-src 'none'; \
+             frame-ancestors 'none'",
+        ),
+    );
+    response
 }
 
 async fn serve_wasm(State(state): State<AppState>) -> Response {
@@ -162,8 +252,15 @@ async fn serve_wasm(State(state): State<AppState>) -> Response {
 }
 
 async fn room_stats(Path(scope): Path<String>, State(state): State<AppState>) -> Response {
-    let stats = state.with_room(&scope, |room| room.stats());
-    axum::Json(stats).into_response()
+    if !limits::scope_is_acceptable(&scope) {
+        return (StatusCode::BAD_REQUEST, "invalid scope").into_response();
+    }
+    // Reads must not mint rooms; otherwise polling stats is itself an
+    // allocation vector.
+    match state.with_existing(&scope, |room| room.stats()) {
+        Some(stats) => axum::Json(stats).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such room").into_response(),
+    }
 }
 
 async fn websocket(
@@ -171,10 +268,17 @@ async fn websocket(
     Path(scope): Path<String>,
     State(state): State<AppState>,
 ) -> Response {
+    if !limits::scope_is_acceptable(&scope) {
+        return (StatusCode::BAD_REQUEST, "invalid scope").into_response();
+    }
     if !authorize(&scope) {
         return (StatusCode::FORBIDDEN, "not permitted").into_response();
     }
-    upgrade.on_upgrade(move |socket| session(socket, scope, state))
+    // Enforced at the protocol layer as well as in the read loop, so an
+    // oversized frame is rejected before it is ever fully buffered.
+    upgrade
+        .max_message_size(limits::MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| session(socket, scope, state))
 }
 
 async fn session(socket: WebSocket, scope: String, state: AppState) {
@@ -184,31 +288,51 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
 
     let (mut outbound, mut inbound) = socket.split();
 
-    let (mut updates, init) = {
-        let joined = state.with_room(&scope, |room| (room.subscribe(), room.join_state()));
+    let joined = state.with_room(&scope, |room| {
+        let updates = room.subscribe();
         let payload = serde_json::to_string(&ServerMessage::Init {
             actor: connection,
-            doc: joined.1.document(),
+            doc: room.document(),
         });
-        match payload {
-            Ok(json) => (joined.0, json),
-            Err(_) => return,
-        }
+        (updates, payload)
+    });
+
+    // At the room cap: refuse this connection rather than evict somebody
+    // else's board.
+    let Some((mut updates, payload)) = joined else {
+        let _ = outbound.send(Message::Close(None)).await;
+        return;
     };
+    let Ok(init) = payload else { return };
 
     if outbound.send(Message::Text(init.into())).await.is_err() {
         return;
     }
 
     let mut relay = tokio::spawn(async move {
-        while let Ok((origin, payload)) = updates.recv().await {
-            // Do not echo a connection's own operations back to it; it applied
-            // them locally the moment the user drew.
-            if origin == connection {
-                continue;
-            }
-            if outbound.send(Message::Text(payload.into())).await.is_err() {
-                break;
+        loop {
+            match updates.recv().await {
+                Ok((origin, payload)) => {
+                    // Do not echo a connection's own operations back to it; it
+                    // applied them locally the moment the user drew.
+                    if origin == connection {
+                        continue;
+                    }
+                    if outbound.send(Message::Text(payload.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // The consumer fell behind the channel. Closing is deliberate:
+                // the client reconnects and receives a fresh full document, so
+                // it re-converges. Continuing would silently skip operations,
+                // which is the one outcome a CRDT cannot repair.
+                Err(RecvError::Lagged(missed)) => {
+                    eprintln!(
+                        "k-board: connection {connection} lagged {missed} messages, closing to force resync"
+                    );
+                    break;
+                }
+                Err(RecvError::Closed) => break,
             }
         }
     });
@@ -216,10 +340,25 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
     let receiving_state = state.clone();
     let receiving_scope = scope.clone();
     let mut receive = tokio::spawn(async move {
+        let mut limiter = RateLimiter::new();
+
         while let Some(Ok(message)) = inbound.next().await {
             let Message::Text(text) = message else {
                 continue;
             };
+
+            if text.len() > limits::MAX_FRAME_BYTES {
+                break; // Not a legitimate client.
+            }
+
+            if !limiter.allow() {
+                if limiter.should_disconnect() {
+                    eprintln!("k-board: connection {connection} exceeded its rate budget, closing");
+                    break;
+                }
+                continue; // Transient burst: drop this frame, keep the session.
+            }
+
             let Ok(ClientMessage::Ops { ops }) = serde_json::from_str::<ClientMessage>(&text)
             else {
                 continue; // A malformed frame drops, it does not close the session.
@@ -232,10 +371,24 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
                 continue;
             };
 
-            receiving_state.with_room(&receiving_scope, |room| {
-                room.accept(ops);
-                room.broadcast(connection, relayed);
-            });
+            // Relay only what the room accepted. Broadcasting a refused batch
+            // would leave peers holding operations this room does not have —
+            // divergence introduced by the server itself.
+            let outcome =
+                receiving_state.with_existing(&receiving_scope, |room| match room.accept(&ops) {
+                    Ok(_) => {
+                        room.broadcast(connection, relayed);
+                        Ok(())
+                    }
+                    Err(refused) => Err(refused),
+                });
+
+            match outcome {
+                Some(Ok(())) => {}
+                Some(Err(Refused::BatchTooLarge)) => break,
+                Some(Err(Refused::RoomFull)) => continue,
+                None => break, // The room was reclaimed underneath us.
+            }
         }
     });
 

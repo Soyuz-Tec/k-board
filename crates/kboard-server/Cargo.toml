@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 kboard-core = { path = "../kboard-core" }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures-util = "0.3"
 serde = { workspace = true }

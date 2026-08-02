@@ -1,85 +1,91 @@
 //! Per-scope room state.
 //!
-//! A room is an operation log plus a snapshot of everything the log has already
-//! absorbed. Joining clients receive the snapshot, not the history — which is
-//! what keeps a reconnect cheap on a board that has existed for months.
+//! A room holds one materialised document and a broadcast channel. That is all.
+//!
+//! An earlier version also kept an in-memory operation log and folded it into a
+//! snapshot periodically. That was wrong twice over: the log grew without bound
+//! (a memory leak on any long-lived board), and serving a join meant cloning the
+//! whole document to fold the tail — O(document) work on *every incoming
+//! message*. Absorbing directly makes accept O(operations) and join O(1).
+//!
+//! The operation log is not gone, it belongs somewhere else: durable storage
+//! behind the engine's `OpLog` port, where truncation is a storage concern
+//! rather than a RAM concern. See `docs/adr/0005-in-memory-room-state.md`.
 //!
 //! Note what is *not* here: no identity, no permissions, no tenancy rules. The
 //! server decides who may open a scope before this module is reached, and the
 //! engine below it decides nothing at all.
 
-use kboard_core::document::ScopeId;
+use std::time::Instant;
+
+use kboard_core::document::{Document, ScopeId};
 use kboard_core::op::StampedOp;
 use kboard_core::snapshot::Snapshot;
 use tokio::sync::broadcast;
 
-/// How many operations may accumulate before the log is folded into the
-/// snapshot and truncated. Small enough here to exercise the path in a demo;
-/// a real deployment tunes this against write volume.
-const COMPACT_AFTER: usize = 200;
+use crate::limits;
 
 /// Broadcast payload: the connection that produced it, and the JSON to relay.
 /// The origin is carried so a sender does not receive its own echo.
 pub type Fanout = (u64, String);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The room is at its element ceiling. Further creation would let one board
+    /// consume the process.
+    RoomFull,
+    /// More operations in one frame than a legitimate client sends.
+    BatchTooLarge,
+}
+
 pub struct Room {
-    snapshot: Snapshot,
-    /// Operations not yet folded into the snapshot.
-    tail: Vec<StampedOp>,
+    state: Snapshot,
     sender: broadcast::Sender<Fanout>,
-    compactions: u64,
+    accepted: u64,
+    last_active: Instant,
 }
 
 impl Room {
     pub fn new(scope: ScopeId) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self {
-            snapshot: Snapshot::empty(scope),
-            tail: Vec::new(),
+            state: Snapshot::empty(scope),
             sender,
-            compactions: 0,
+            accepted: 0,
+            last_active: Instant::now(),
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Fanout> {
+    pub fn subscribe(&mut self) -> broadcast::Receiver<Fanout> {
+        self.last_active = Instant::now();
         self.sender.subscribe()
     }
 
-    /// The document a joining client should start from.
-    ///
-    /// Snapshot plus tail — never the raw history, which may have been
-    /// truncated. `Snapshot::absorb` is idempotent, so folding the tail into a
-    /// clone here is safe and cheap.
-    pub fn join_state(&self) -> Snapshot {
-        let mut current = self.snapshot.clone();
-        current.absorb(&self.tail);
-        current
+    /// The document a joining client starts from. No clone, no fold.
+    pub fn document(&self) -> &Document {
+        self.state.document()
     }
 
-    /// Accept operations from a client. Returns how many changed the document.
+    /// Accept operations from a client.
     ///
-    /// Operations are retained even when they change nothing: a stale write is
-    /// still part of history until compaction folds it away.
-    pub fn accept(&mut self, ops: Vec<StampedOp>) -> usize {
-        let mut probe = self.snapshot.clone();
-        probe.absorb(&self.tail);
-        let changed = probe.absorb(&ops);
-
-        self.tail.extend(ops);
-        if self.tail.len() >= COMPACT_AFTER {
-            self.compact();
+    /// # Errors
+    ///
+    /// [`Refused::BatchTooLarge`] or [`Refused::RoomFull`] when a limit would be
+    /// crossed. Both are refusals of the whole batch: applying part of it would
+    /// leave peers holding operations this room rejected, which is divergence.
+    pub fn accept(&mut self, ops: &[StampedOp]) -> Result<usize, Refused> {
+        if ops.len() > limits::MAX_OPS_PER_FRAME {
+            return Err(Refused::BatchTooLarge);
         }
-        changed
-    }
+        // Checked before absorbing rather than after, so the ceiling is a real
+        // ceiling and not a threshold that one oversized batch can overshoot.
+        if self.state.document().total_count() >= limits::MAX_ELEMENTS_PER_ROOM {
+            return Err(Refused::RoomFull);
+        }
 
-    /// Fold the tail into the snapshot and drop it.
-    ///
-    /// Safe because `join_state` never reads the tail independently, and every
-    /// connected client already holds everything the tail contains.
-    fn compact(&mut self) {
-        let folded = std::mem::take(&mut self.tail);
-        self.snapshot.absorb(&folded);
-        self.compactions += 1;
+        self.last_active = Instant::now();
+        self.accepted += ops.len() as u64;
+        Ok(self.state.absorb(ops))
     }
 
     pub fn broadcast(&self, origin: u64, payload: String) {
@@ -87,12 +93,18 @@ impl Room {
         let _ = self.sender.send((origin, payload));
     }
 
+    /// Whether this room can be reclaimed: nobody connected, and quiet for
+    /// longer than the retention window.
+    pub fn is_reclaimable(&self, now: Instant) -> bool {
+        self.sender.receiver_count() == 0
+            && now.duration_since(self.last_active) > limits::ROOM_IDLE_TTL
+    }
+
     pub fn stats(&self) -> RoomStats {
         RoomStats {
-            elements: self.join_state().document().live_count(),
-            tail: self.tail.len(),
-            absorbed: self.snapshot.absorbed(),
-            compactions: self.compactions,
+            elements: self.state.document().live_count(),
+            tombstones: self.state.document().total_count() - self.state.document().live_count(),
+            accepted: self.accepted,
             subscribers: self.sender.receiver_count(),
         }
     }
@@ -101,9 +113,8 @@ impl Room {
 #[derive(Debug, serde::Serialize)]
 pub struct RoomStats {
     pub elements: usize,
-    pub tail: usize,
-    pub absorbed: u64,
-    pub compactions: u64,
+    pub tombstones: usize,
+    pub accepted: u64,
     pub subscribers: usize,
 }
 
@@ -129,39 +140,77 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn a_joining_client_sees_everything_accepted() {
-        let mut room = Room::new(ScopeId::new("t/b"));
-        room.accept(ops(1, 5));
-        assert_eq!(room.join_state().document().live_count(), 5);
+    fn room() -> Room {
+        Room::new(ScopeId::new("t/b"))
     }
 
     #[test]
-    fn compaction_preserves_the_document() {
-        let mut room = Room::new(ScopeId::new("t/b"));
-        // Enough to cross the threshold and force at least one fold.
-        room.accept(ops(1, 250));
-
-        let stats = room.stats();
-        assert!(stats.compactions >= 1, "the log should have been folded");
-        assert!(stats.tail < COMPACT_AFTER);
-        assert_eq!(
-            room.join_state().document().live_count(),
-            250,
-            "compaction must not lose elements"
-        );
+    fn a_joining_client_sees_everything_accepted() {
+        let mut room = room();
+        room.accept(&ops(1, 5)).unwrap();
+        assert_eq!(room.document().live_count(), 5);
     }
 
     #[test]
     fn replayed_operations_change_nothing() {
-        let mut room = Room::new(ScopeId::new("t/b"));
+        let mut room = room();
         let batch = ops(1, 4);
-        assert_eq!(room.accept(batch.clone()), 4);
+        assert_eq!(room.accept(&batch).unwrap(), 4);
         assert_eq!(
-            room.accept(batch),
+            room.accept(&batch).unwrap(),
             0,
             "a retried batch is absorbed idempotently"
         );
-        assert_eq!(room.join_state().document().live_count(), 4);
+        assert_eq!(room.document().live_count(), 4);
+    }
+
+    #[test]
+    fn an_oversized_batch_is_refused_whole() {
+        let mut room = room();
+        let huge = ops(1, (limits::MAX_OPS_PER_FRAME + 1) as u128);
+        assert_eq!(room.accept(&huge), Err(Refused::BatchTooLarge));
+        assert_eq!(
+            room.document().live_count(),
+            0,
+            "a refused batch must not partially apply"
+        );
+    }
+
+    #[test]
+    fn stats_report_tombstones_separately() {
+        let mut room = room();
+        room.accept(&ops(1, 3)).unwrap();
+        let mut clock = HlcGenerator::new(ActorId(9));
+        let stamp = clock.tick(9_000);
+        room.accept(&[StampedOp::new(
+            stamp,
+            kboard_core::op::Op::Delete {
+                element: ElementId(0),
+            },
+        )])
+        .unwrap();
+
+        let stats = room.stats();
+        assert_eq!(stats.elements, 2);
+        assert_eq!(stats.tombstones, 1);
+    }
+
+    #[test]
+    fn an_occupied_room_is_never_reclaimed() {
+        let mut room = room();
+        let _subscriber = room.subscribe();
+        // Far beyond the TTL, but somebody is still connected.
+        let distant_future = Instant::now() + limits::ROOM_IDLE_TTL * 10;
+        assert!(!room.is_reclaimable(distant_future));
+    }
+
+    #[test]
+    fn an_empty_idle_room_is_reclaimable() {
+        let room = room();
+        assert!(
+            !room.is_reclaimable(Instant::now()),
+            "still within the window"
+        );
+        assert!(room.is_reclaimable(Instant::now() + limits::ROOM_IDLE_TTL * 2));
     }
 }
