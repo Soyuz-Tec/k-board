@@ -1,0 +1,27 @@
+[package]
+name = "kboard-core"
+description = "Embeddable multi-tenant collaborative canvas engine: convergent document model with no ambient authority."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `lib`      -> Rust consumers and the wasm32 target
+# `cdylib`   -> C ABI for host runtimes (BEAM/Rustler, PyO3, napi-rs, JVM Panama, .NET P/Invoke)
+# `staticlib`-> hosts that prefer static linking
+[lib]
+name = "kboard_core"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = ["json"]
+# Wire encoding. Hosts embedding over FFI may disable it and pass their own.
+json = []
