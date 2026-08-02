@@ -51,7 +51,10 @@ impl fmt::Display for MergeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ScopeMismatch { expected, found } => {
-                write!(formatter, "refused cross-scope merge: {expected} != {found}")
+                write!(
+                    formatter,
+                    "refused cross-scope merge: {expected} != {found}"
+                )
             }
         }
     }
@@ -67,7 +70,10 @@ pub struct Document {
 
 impl Document {
     pub fn new(scope: ScopeId) -> Self {
-        Self { scope, elements: BTreeMap::new() }
+        Self {
+            scope,
+            elements: BTreeMap::new(),
+        }
     }
 
     pub const fn scope(&self) -> &ScopeId {
@@ -102,7 +108,9 @@ impl Document {
     }
 
     pub fn live(&self) -> impl Iterator<Item = &Element> {
-        self.elements.values().filter(|element| !element.is_deleted())
+        self.elements
+            .values()
+            .filter(|element| !element.is_deleted())
     }
 
     /// Includes tombstones. Snapshotting and garbage collection need these;
@@ -126,7 +134,10 @@ impl Document {
 
     /// A z-key that places a new element above everything currently live.
     pub fn z_index_for_top(&self) -> String {
-        let highest = self.ordered().last().map(|element| element.z_index().to_owned());
+        let highest = self
+            .ordered()
+            .last()
+            .map(|element| element.z_index().to_owned());
         frac::between(highest.as_deref().filter(|key| !key.is_empty()), None)
     }
 
@@ -161,7 +172,8 @@ impl Document {
 
     /// Tombstone an element.
     pub fn delete(&mut self, id: ElementId, stamp: Hlc) -> bool {
-        self.entry(id).set(PropKey::Deleted, PropValue::Bool(true), stamp)
+        self.entry(id)
+            .set(PropKey::Deleted, PropValue::Bool(true), stamp)
     }
 
     /// Permanently drop tombstones whose last write is older than `before`.
@@ -196,7 +208,11 @@ mod tests {
     const B: ActorId = ActorId(2);
 
     fn stamp(wall: u64, actor: ActorId) -> Hlc {
-        Hlc { wall, counter: 0, actor }
+        Hlc {
+            wall,
+            counter: 0,
+            actor,
+        }
     }
 
     fn scope() -> ScopeId {
@@ -213,7 +229,10 @@ mod tests {
     fn cross_tenant_merge_is_refused() {
         let mut mine = Document::new(ScopeId::new("tenant-a/board-1"));
         let theirs = Document::new(ScopeId::new("tenant-b/board-1"));
-        assert!(matches!(mine.merge(&theirs), Err(MergeError::ScopeMismatch { .. })));
+        assert!(matches!(
+            mine.merge(&theirs),
+            Err(MergeError::ScopeMismatch { .. })
+        ));
     }
 
     #[test]
@@ -243,7 +262,9 @@ mod tests {
         with_rect(&mut replica, 1, 10.0, stamp(1, A));
 
         let mut editor = replica.clone();
-        editor.entry(ElementId(1)).set(PropKey::X, PropValue::Num(99.0), stamp(5, B));
+        editor
+            .entry(ElementId(1))
+            .set(PropKey::X, PropValue::Num(99.0), stamp(5, B));
 
         replica.delete(ElementId(1), stamp(9, A));
         replica.merge(&editor).unwrap();
@@ -290,7 +311,11 @@ mod tests {
         with_rect(&mut document, 1, 0.0, stamp(1, A));
         document.delete(ElementId(1), stamp(5, A));
 
-        assert_eq!(document.collect_tombstones(stamp(3, A)), 0, "too early to collect");
+        assert_eq!(
+            document.collect_tombstones(stamp(3, A)),
+            0,
+            "too early to collect"
+        );
         assert_eq!(document.collect_tombstones(stamp(50, A)), 1);
         assert_eq!(document.total_count(), 0);
     }

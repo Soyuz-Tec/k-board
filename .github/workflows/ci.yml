@@ -72,6 +72,43 @@ jobs:
       - name: Exhaustive convergence suite
         run: cargo test -p kboard-core --test convergence -- --nocapture
 
+  e2e:
+    name: end-to-end convergence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Node 22+ for the built-in WebSocket client, so the check needs no
+      # npm install and no dependency of its own.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build engine and server
+        run: |
+          cargo build -p kboard-ffi --target wasm32-unknown-unknown --release
+          cargo build -p kboard-server --release
+
+      - name: Start server
+        run: |
+          ./target/release/kboard-server &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/health && break
+            sleep 1
+          done
+
+      # Proves the whole path — wasm engine, wire format, server fan-out —
+      # not just the merge laws in isolation.
+      - name: Two-replica convergence
+        run: node scripts/two-replica-check.mjs
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest

@@ -77,7 +77,11 @@ mod tests {
     const B: ActorId = ActorId(2);
 
     fn stamp(wall: u64, actor: ActorId) -> Hlc {
-        Hlc { wall, counter: 0, actor }
+        Hlc {
+            wall,
+            counter: 0,
+            actor,
+        }
     }
 
     #[test]

@@ -39,7 +39,11 @@ pub struct Hlc {
 impl Hlc {
     /// The stamp that precedes every other stamp for `actor`.
     pub const fn zero(actor: ActorId) -> Self {
-        Self { wall: 0, counter: 0, actor }
+        Self {
+            wall: 0,
+            counter: 0,
+            actor,
+        }
     }
 }
 
@@ -73,7 +77,9 @@ pub struct HlcGenerator {
 
 impl HlcGenerator {
     pub const fn new(actor: ActorId) -> Self {
-        Self { last: Hlc::zero(actor) }
+        Self {
+            last: Hlc::zero(actor),
+        }
     }
 
     pub const fn actor(&self) -> ActorId {
@@ -94,7 +100,11 @@ impl HlcGenerator {
         } else {
             0
         };
-        self.last = Hlc { wall, counter, actor: self.last.actor };
+        self.last = Hlc {
+            wall,
+            counter,
+            actor: self.last.actor,
+        };
         self.last
     }
 
@@ -110,7 +120,11 @@ impl HlcGenerator {
             (false, true) => remote.counter.saturating_add(1),
             (false, false) => 0,
         };
-        self.last = Hlc { wall, counter, actor: self.last.actor };
+        self.last = Hlc {
+            wall,
+            counter,
+            actor: self.last.actor,
+        };
         self.last
     }
 }
@@ -124,16 +138,36 @@ mod tests {
 
     #[test]
     fn ordering_is_total_across_actors() {
-        let x = Hlc { wall: 5, counter: 0, actor: A };
-        let y = Hlc { wall: 5, counter: 0, actor: B };
-        assert_ne!(x.cmp(&y), Ordering::Equal, "equal wall+counter must still order");
+        let x = Hlc {
+            wall: 5,
+            counter: 0,
+            actor: A,
+        };
+        let y = Hlc {
+            wall: 5,
+            counter: 0,
+            actor: B,
+        };
+        assert_ne!(
+            x.cmp(&y),
+            Ordering::Equal,
+            "equal wall+counter must still order"
+        );
         assert!(x < y);
     }
 
     #[test]
     fn wall_dominates_counter_and_actor() {
-        let earlier = Hlc { wall: 5, counter: 999, actor: B };
-        let later = Hlc { wall: 6, counter: 0, actor: A };
+        let earlier = Hlc {
+            wall: 5,
+            counter: 999,
+            actor: B,
+        };
+        let later = Hlc {
+            wall: 6,
+            counter: 0,
+            actor: A,
+        };
         assert!(earlier < later);
     }
 
@@ -153,7 +187,10 @@ mod tests {
         let first = gen.tick(100);
         // NTP correction, container migration, a laptop waking up.
         let second = gen.tick(40);
-        assert!(second > first, "a backwards host clock must not break ordering");
+        assert!(
+            second > first,
+            "a backwards host clock must not break ordering"
+        );
         assert_eq!(second.wall, 100);
     }
 
@@ -161,9 +198,16 @@ mod tests {
     fn observe_orders_after_a_remote_stamp_from_the_future() {
         let mut gen = HlcGenerator::new(A);
         gen.tick(100);
-        let remote = Hlc { wall: 5_000, counter: 3, actor: B };
+        let remote = Hlc {
+            wall: 5_000,
+            counter: 3,
+            actor: B,
+        };
         let reply = gen.observe(remote, 101);
-        assert!(reply > remote, "a causal reply must outrank what it replies to");
+        assert!(
+            reply > remote,
+            "a causal reply must outrank what it replies to"
+        );
         assert_eq!(reply.wall, 5_000);
         assert_eq!(reply.counter, 4);
     }

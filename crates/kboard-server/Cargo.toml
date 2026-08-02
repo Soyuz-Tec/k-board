@@ -1,0 +1,17 @@
+[package]
+name = "kboard-server"
+description = "Standalone sync server for k-board: per-scope WebSocket fan-out over a compacting operation log."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kboard-core = { path = "../kboard-core" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["fs"] }
+futures-util = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }

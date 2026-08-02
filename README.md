@@ -3,11 +3,22 @@
 A multi-tenant collaborative canvas engine, built to work equally well as its
 own product and as a component inside someone else's platform.
 
-**Status: early. The document engine is complete and tested. The renderer, the
-UI shell, and the sync server are not written yet.** See [Roadmap](#roadmap) for
-what exists and what does not.
+**Status: working, early.** You can run it, draw in it, and watch two tabs
+converge. The renderer is Canvas 2D rather than GPU, storage is in memory, and
+the standalone deployment has no authentication yet. See
+[Roadmap](#roadmap) for exactly what exists.
 
 ---
+
+## Quick start
+
+```bash
+cargo build -p kboard-ffi --target wasm32-unknown-unknown --release
+cargo run -p kboard-server
+```
+
+Open <http://127.0.0.1:8080> in **two tabs**. Each tab is an independent
+replica with its own copy of the document. Draw in either one.
 
 ## Why this exists
 
@@ -36,14 +47,12 @@ logical clock. Two people editing different attributes of the same shape never
 contend, so both edits survive. Two people editing the *same* attribute resolve
 deterministically — every replica picks the same winner, in any arrival order.
 
-```rust
-// Alice drags it. Bob recolours it. Neither has seen the other.
-alice.merge(&bob)?;
-bob.merge(&alice)?;
+This is verified end to end against a running server, not just in unit tests:
 
-assert_eq!(alice, bob);                          // they converge
-assert_eq!(shape.num(PropKey::X), Some(250.0));  // the drag survived
-assert_eq!(shape.get(&PropKey::Stroke), ...);    // so did the recolour
+```
+PASS  replicas converge after concurrent edits
+PASS  the move survived
+PASS  the concurrent restyle also survived
 ```
 
 ### The engine holds no ambient authority
@@ -55,7 +64,7 @@ database. Each is a trait the host implements:
 |---|---|---|
 | `PhysicalClock` | System time | Host's clock |
 | `Authority` | Own RBAC | Host's membership check |
-| `OpLog` | Own Postgres | Host's existing table |
+| `OpLog` | Own storage | Host's existing table |
 | `SnapshotStore` | Own storage | Host's storage |
 
 The engine cannot tell the difference, and that is the point. The day it can, it
@@ -65,28 +74,44 @@ Tenancy is enforced in exactly one place: a document carries an opaque
 `ScopeId` and *refuses* to merge with a document from another scope. The engine
 never parses that identifier — it only compares it.
 
-## One crate, four targets
+## Architecture
 
 ```
-kboard-core ──┬── wasm32          → browsers
-              ├── cdylib (C ABI)  → BEAM/Rustler, PyO3, napi-rs, JVM, .NET
-              ├── staticlib       → hosts that link statically
-              └── native          → the standalone sync server
+crates/kboard-core     safe, forbid(unsafe_code) — the convergent document model
+crates/kboard-ffi      the only unsafe code — C ABI, panic-trapped at every export
+crates/kboard-server   standalone adapter — WebSocket fan-out, compacting op log
+web/                   Canvas 2D client, no bundler, no npm
+scripts/               end-to-end convergence check
 ```
 
-Client and server therefore run **the same machine code** for merge. The largest
-source of bugs in collaborative editors is two implementations of the merge rule
-drifting apart; this removes the category rather than testing for it.
+One crate, four targets:
 
-## Try it
+```
+kboard-ffi ──┬── wasm32          → browsers          (359K, no imports, no JS glue)
+             ├── cdylib (C ABI)  → BEAM/Rustler, PyO3, napi-rs, JVM, .NET
+             ├── staticlib       → hosts that link statically
+             └── native          → the standalone server
+```
+
+Client and server run **the same machine code** for merge. The largest source of
+bugs in collaborative editors is two implementations of the merge rule drifting
+apart; this removes the category rather than testing for it.
+
+### The FFI rule
+
+No panic ever crosses the boundary. A panic unwinding into a foreign runtime
+does not fail one call — it can abort the host process. Every export is wrapped
+in `catch_unwind`, boards live in a process-global registry (a BEAM NIF may open
+a board on one scheduler thread and call it from another), and mutex poisoning
+is recovered from rather than propagated.
+
+## Verification
 
 ```bash
-cargo test
+cargo test --workspace          # 75 tests
+cargo clippy --workspace --all-targets -- -D warnings
+node scripts/two-replica-check.mjs   # against a running server
 ```
-
-58 tests, including a 5,040-case exhaustive permutation proof.
-
-## What is proven
 
 These are laws, not samples. A CRDT that converges only for the orderings you
 happened to try is not a CRDT.
@@ -101,47 +126,52 @@ happened to try is not a CRDT.
 | Snapshot fidelity | `snapshot + tail` equals full replay, under every ordering |
 | Tenant isolation | Cross-scope merge is refused and does not partially apply |
 | Wire stability | Documents and op logs round-trip through JSON, including custom keys |
+| End to end | Two live replicas over WebSocket converge with both concurrent edits intact |
 
-## Layout
+## Accessibility
 
-```
-crates/kboard-core/src/
-  clock.rs      Hybrid logical clock — the total order everything rests on
-  lww.rs        Last-writer-wins register
-  prop.rs       Property keys and values
-  element.rs    Element as a map of independently convergent properties
-  document.rs   Convergent element map, scoped to one tenant
-  frac.rs       Fractional z-index — concurrent reorder without renumbering
-  op.rs         Operations, apply, and why there is no `Clear` operation
-  snapshot.rs   Compaction, so joining is not O(history)
-  ports.rs      Everything the engine refuses to decide for itself
-```
+The client mirrors the scene into a live DOM list, not just pixels. Canvas
+content carries no semantics, so a canvas-only app is unreadable to assistive
+technology no matter how good its keyboard handling is.
+
+The mirror is deliberately **not** driven by `requestAnimationFrame` — rAF is
+paused entirely in a background tab, and a screen reader user does not need
+pixels to be painting for content to be readable.
 
 ## Roadmap
 
 **Done**
 - Convergent document model with per-property merge
-- Hybrid logical clocks and deterministic tiebreaking
-- Fractional z-ordering
+- Hybrid logical clocks, deterministic tiebreaking, fractional z-ordering
 - Snapshot compaction and tombstone collection
-- Authority ports with in-memory implementations
-- Tenant scope isolation
-- JSON wire format
-- Exhaustive convergence proofs
+- Authority ports; tenant scope isolation
+- C ABI with panic trapping; wasm32 and native from one crate
+- WebSocket sync server with per-room compacting log
+- Browser client: shapes, freehand, select/move, erase, pan, zoom, colours
+- Local-first queueing — draw offline, reconnect, replay
+- DOM accessibility mirror
+- CI: fmt, clippy, tests, wasm build, convergence proofs, e2e, audit
 
 **Next**
-- FFI surface: `#[no_mangle]` C ABI exports with panic trapping at the boundary
-- Rustler binding, so a BEAM host can call `merge`, `snapshot`, and `validate`
-- Headless renderer (`lyon` tessellation → `resvg`) for server-side SVG/PNG
+- Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
+- Headless renderer (`lyon` → `resvg`) for server-side SVG/PNG
 - GPU renderer (`wgpu`/`vello`) with a WebGL2 fallback
-- TypeScript shell as a framework-agnostic Web Component
-- DOM-projected accessibility tree — the scene graph as live ARIA, not pixels
-- Standalone sync server
+- Durable storage behind `OpLog`/`SnapshotStore` (currently in memory)
+- Authentication in the standalone server — `authorize()` admits everyone today
+- Undo/redo; text elements; images
+- Framework-agnostic Web Component packaging
 
 **Deliberately not yet decided**
 - Text CRDT. Text is currently a last-writer-wins property, so concurrent edits
   to one text block keep only one. A sequence CRDT is the fix; it is not free,
   and the current behaviour is honest and documented rather than silently wrong.
+
+## Not production
+
+- Rooms are in memory; restarting the server loses boards.
+- `authorize()` in `kboard-server` returns `true` for everyone. It is marked as
+  the seam where a real deployment authenticates.
+- No rate limiting, no payload caps at the server edge.
 
 ## Licence
 

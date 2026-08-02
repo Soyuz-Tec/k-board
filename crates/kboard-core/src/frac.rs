@@ -63,7 +63,13 @@ pub fn between(before: Option<&str>, after: Option<&str>) -> String {
         let low = digit_at(lower, index);
         let high = if bounded {
             // `upper` is Some whenever `bounded` holds.
-            upper.map_or(BASE, |u| if index < u.len() { value_of(u[index]) } else { BASE })
+            upper.map_or(BASE, |u| {
+                if index < u.len() {
+                    value_of(u[index])
+                } else {
+                    BASE
+                }
+            })
         } else {
             BASE
         };
@@ -148,7 +154,10 @@ mod tests {
     #[test]
     fn misordered_input_degrades_instead_of_hanging() {
         let key = between(Some("Z"), Some("A"));
-        assert!(key.as_str() > "Z", "must stay deterministic on corrupt input");
+        assert!(
+            key.as_str() > "Z",
+            "must stay deterministic on corrupt input"
+        );
     }
 
     #[test]

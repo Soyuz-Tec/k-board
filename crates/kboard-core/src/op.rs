@@ -59,11 +59,13 @@ impl StampedOp {
 /// broadcast should not.
 pub fn apply(document: &mut Document, stamped: &StampedOp) -> bool {
     match &stamped.op {
-        Op::Set { element, key, value } => {
-            document
-                .entry(*element)
-                .set(key.clone(), value.clone(), stamped.stamp)
-        }
+        Op::Set {
+            element,
+            key,
+            value,
+        } => document
+            .entry(*element)
+            .set(key.clone(), value.clone(), stamped.stamp),
         Op::Delete { element } => document.delete(*element, stamped.stamp),
     }
 }
@@ -75,7 +77,9 @@ pub fn apply(document: &mut Document, stamped: &StampedOp) -> bool {
 /// applying in log order keeps the change count meaningful for hosts that
 /// broadcast only on change.
 pub fn apply_all(document: &mut Document, ops: &[StampedOp]) -> usize {
-    ops.iter().filter(|stamped| apply(document, stamped)).count()
+    ops.iter()
+        .filter(|stamped| apply(document, stamped))
+        .count()
 }
 
 /// Expand "clear the board" into explicit tombstones at the originating replica.
@@ -92,7 +96,14 @@ pub fn apply_all(document: &mut Document, ops: &[StampedOp]) -> usize {
 pub fn clear(document: &Document, clock: &mut HlcGenerator, now_millis: u64) -> Vec<StampedOp> {
     document
         .live()
-        .map(|element| StampedOp::new(clock.tick(now_millis), Op::Delete { element: element.id() }))
+        .map(|element| {
+            StampedOp::new(
+                clock.tick(now_millis),
+                Op::Delete {
+                    element: element.id(),
+                },
+            )
+        })
         .collect()
 }
 
@@ -109,7 +120,14 @@ pub fn upsert(
     props
         .into_iter()
         .map(|(key, value)| {
-            StampedOp::new(clock.tick(now_millis), Op::Set { element, key, value })
+            StampedOp::new(
+                clock.tick(now_millis),
+                Op::Set {
+                    element,
+                    key,
+                    value,
+                },
+            )
         })
         .collect()
 }
@@ -140,7 +158,10 @@ mod tests {
 
         let mut document = Document::new(scope());
         assert_eq!(apply_all(&mut document, &ops), 2);
-        assert_eq!(document.get(ElementId(1)).unwrap().kind(), Some(ElementKind::Ellipse));
+        assert_eq!(
+            document.get(ElementId(1)).unwrap().kind(),
+            Some(ElementKind::Ellipse)
+        );
     }
 
     #[test]
@@ -169,19 +190,33 @@ mod tests {
         let mut origin = Document::new(scope());
         apply_all(
             &mut origin,
-            &upsert(ElementId(1), [(PropKey::X, PropValue::Num(1.0))], &mut clock_a, 10),
+            &upsert(
+                ElementId(1),
+                [(PropKey::X, PropValue::Num(1.0))],
+                &mut clock_a,
+                10,
+            ),
         );
 
         // A second replica adds an element the origin has not received.
         let mut peer = origin.clone();
-        let unseen = upsert(ElementId(2), [(PropKey::X, PropValue::Num(2.0))], &mut clock_b, 11);
+        let unseen = upsert(
+            ElementId(2),
+            [(PropKey::X, PropValue::Num(2.0))],
+            &mut clock_b,
+            11,
+        );
         apply_all(&mut peer, &unseen);
 
         let clear_ops = clear(&origin, &mut clock_a, 20);
         apply_all(&mut origin, &clear_ops);
         origin.merge(&peer).unwrap();
 
-        assert_eq!(origin.live_count(), 1, "the unseen element survives the clear");
+        assert_eq!(
+            origin.live_count(),
+            1,
+            "the unseen element survives the clear"
+        );
         assert!(origin.get(ElementId(2)).is_some_and(|e| !e.is_deleted()));
     }
 
@@ -191,7 +226,12 @@ mod tests {
         let mut document = Document::new(scope());
         apply_all(
             &mut document,
-            &upsert(ElementId(1), [(PropKey::X, PropValue::Num(1.0))], &mut clock, 10),
+            &upsert(
+                ElementId(1),
+                [(PropKey::X, PropValue::Num(1.0))],
+                &mut clock,
+                10,
+            ),
         );
 
         let clear_ops = clear(&document, &mut clock, 20);

@@ -1,0 +1,235 @@
+:root {
+  --bg: #ffffff;
+  --panel: #f8f9fa;
+  --border: #dee2e6;
+  --text: #1e1e1e;
+  --muted: #6c757d;
+  --accent: #1971c2;
+  --accent-soft: #e7f5ff;
+  --grid: #eceef0;
+  --live: #2f9e44;
+  --offline: #e8590c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121212;
+    --panel: #1b1b1f;
+    --border: #2c2c31;
+    --text: #ececf1;
+    --muted: #9aa0a6;
+    --accent: #4dabf7;
+    --accent-soft: #16283d;
+    --grid: #1d1d21;
+    --live: #51cf66;
+    --offline: #ff922b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* -- toolbar ------------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.tools,
+.swatches {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tool:hover {
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.tool[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tool .label {
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .tool .label {
+    display: none;
+  }
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--c);
+  cursor: pointer;
+}
+
+.swatch[aria-checked="true"] {
+  border-color: var(--accent);
+  outline: 2px solid var(--bg);
+  outline-offset: -4px;
+}
+
+.ghost {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ghost:hover {
+  color: var(--text);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* Keyboard focus must always be visible — a canvas app is already hostile
+   enough to keyboard users without hiding the focus ring. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot.live {
+  background: var(--live);
+}
+
+.dot.offline {
+  background: var(--offline);
+}
+
+/* -- canvas -------------------------------------------------------------- */
+
+main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+canvas.select-mode {
+  cursor: default;
+}
+
+.hint {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  padding: 9px 15px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
+
+.hint strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.hint.gone {
+  opacity: 0;
+}
+
+@media (max-width: 620px) {
+  .hint {
+    white-space: normal;
+    max-width: calc(100vw - 40px);
+    text-align: center;
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

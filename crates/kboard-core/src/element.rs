@@ -60,7 +60,10 @@ pub struct Element {
 
 impl Element {
     pub fn new(id: ElementId) -> Self {
-        Self { id, props: BTreeMap::new() }
+        Self {
+            id,
+            props: BTreeMap::new(),
+        }
     }
 
     pub const fn id(&self) -> ElementId {
@@ -123,7 +126,9 @@ impl Element {
     }
 
     pub fn props(&self) -> impl Iterator<Item = (&PropKey, &PropValue)> {
-        self.props.iter().map(|(key, register)| (key, register.get()))
+        self.props
+            .iter()
+            .map(|(key, register)| (key, register.get()))
     }
 
     pub fn prop_count(&self) -> usize {
@@ -186,7 +191,11 @@ mod tests {
     const B: ActorId = ActorId(2);
 
     fn stamp(wall: u64, actor: ActorId) -> Hlc {
-        Hlc { wall, counter: 0, actor }
+        Hlc {
+            wall,
+            counter: 0,
+            actor,
+        }
     }
 
     fn moved(id: ElementId, x: f64, at: Hlc) -> Element {

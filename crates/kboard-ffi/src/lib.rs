@@ -70,7 +70,9 @@ fn registry() -> &'static Mutex<Registry> {
 /// Recovers from poisoning rather than propagating it. A panic in one call must
 /// not permanently disable the library for a long-lived host process.
 fn with_registry<T>(action: impl FnOnce(&mut Registry) -> T) -> T {
-    let mut guard = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     action(&mut guard)
 }
 
@@ -122,7 +124,10 @@ pub unsafe extern "C" fn kb_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
-    drop(Box::from_raw(std::slice::from_raw_parts_mut(ptr, len) as *mut [u8]));
+    // `slice_from_raw_parts_mut` builds the fat pointer directly. Going via
+    // `slice::from_raw_parts_mut` would materialise a `&mut [u8]` first, which
+    // asserts validity we are about to invalidate by freeing.
+    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
 #[no_mangle]
@@ -159,7 +164,9 @@ pub unsafe extern "C" fn kb_open(scope_ptr: *const u8, scope_len: usize, actor: 
         with_registry(|registry| {
             registry.next_handle += 1;
             let handle = registry.next_handle;
-            registry.boards.insert(handle, Board::open(&scope, u64::from(actor)));
+            registry
+                .boards
+                .insert(handle, Board::open(&scope, u64::from(actor)));
             handle
         })
     }))
@@ -194,7 +201,11 @@ pub unsafe extern "C" fn kb_exec(handle: u32, ptr: *const u8, len: usize, now_ms
         return STATUS_BAD_INPUT;
     };
     // Time crosses as f64 because every host has it and wasm32 avoids i64/BigInt.
-    let now = if now_ms.is_finite() && now_ms > 0.0 { now_ms as u64 } else { 0 };
+    let now = if now_ms.is_finite() && now_ms > 0.0 {
+        now_ms as u64
+    } else {
+        0
+    };
 
     guarded(|| {
         with_registry(|registry| {
@@ -249,6 +260,38 @@ pub extern "C" fn kb_pending(handle: u32) -> u32 {
             match serde_json::to_vec(&pending) {
                 Ok(bytes) => {
                     publish(bytes);
+                    STATUS_OK
+                }
+                Err(_) => STATUS_REFUSED,
+            }
+        })
+    })
+}
+
+/// Merge a whole document as JSON — the join handshake.
+///
+/// Returns [`STATUS_REFUSED`] if the document belongs to another tenant, which
+/// is a routing bug in the host rather than a recoverable condition.
+///
+/// # Safety
+/// `ptr`/`len` must describe valid UTF-8 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn kb_load(handle: u32, ptr: *const u8, len: usize) -> u32 {
+    let Some(json) = borrow_str(ptr, len) else {
+        return STATUS_BAD_INPUT;
+    };
+    let Ok(incoming) = serde_json::from_str::<kboard_core::document::Document>(json) else {
+        return STATUS_BAD_INPUT;
+    };
+
+    guarded(|| {
+        with_registry(|registry| {
+            let Some(board) = registry.boards.get_mut(&handle) else {
+                return STATUS_NO_BOARD;
+            };
+            match board.merge_document(&incoming) {
+                Ok(changed) => {
+                    publish(changed.to_string().into_bytes());
                     STATUS_OK
                 }
                 Err(_) => STATUS_REFUSED,
@@ -318,13 +361,19 @@ mod tests {
         let alice = open("tenant/shared", 1);
         let bob = open("tenant/shared", 2);
 
-        call_exec(alice, r#"{"cmd":"add","kind":"ellipse","x":0,"y":0,"w":5,"h":5}"#);
+        call_exec(
+            alice,
+            r#"{"cmd":"add","kind":"ellipse","x":0,"y":0,"w":5,"h":5}"#,
+        );
         assert_eq!(kb_pending(alice), STATUS_OK);
         let ops = last_string();
 
         assert_eq!(unsafe { kb_merge(bob, ops.as_ptr(), ops.len()) }, STATUS_OK);
         assert_eq!(kb_scene(bob), STATUS_OK);
-        assert!(last_string().contains("ellipse"), "the peer received the shape");
+        assert!(
+            last_string().contains("ellipse"),
+            "the peer received the shape"
+        );
 
         kb_close(alice);
         kb_close(bob);
@@ -336,12 +385,18 @@ mod tests {
         assert_eq!(call_exec(handle, "not json"), STATUS_BAD_INPUT);
         assert_eq!(call_exec(handle, r#"{"cmd":"nope"}"#), STATUS_BAD_INPUT);
         assert_eq!(
-            call_exec(handle, r#"{"cmd":"add","kind":"unicorn","x":0,"y":0,"w":1,"h":1}"#),
+            call_exec(
+                handle,
+                r#"{"cmd":"add","kind":"unicorn","x":0,"y":0,"w":1,"h":1}"#
+            ),
             STATUS_REFUSED
         );
         // Still usable afterwards — the point of trapping rather than aborting.
         assert_eq!(
-            call_exec(handle, r#"{"cmd":"add","kind":"diamond","x":0,"y":0,"w":1,"h":1}"#),
+            call_exec(
+                handle,
+                r#"{"cmd":"add","kind":"diamond","x":0,"y":0,"w":1,"h":1}"#
+            ),
             STATUS_OK
         );
         kb_close(handle);
@@ -349,7 +404,10 @@ mod tests {
 
     #[test]
     fn null_and_unknown_handles_are_refused() {
-        assert_eq!(unsafe { kb_exec(999_999, std::ptr::null(), 0, 0.0) }, STATUS_BAD_INPUT);
+        assert_eq!(
+            unsafe { kb_exec(999_999, std::ptr::null(), 0, 0.0) },
+            STATUS_BAD_INPUT
+        );
         assert_eq!(kb_scene(999_999), STATUS_NO_BOARD);
         assert_eq!(unsafe { kb_open(std::ptr::null(), 0, 1) }, 0);
     }
@@ -367,5 +425,54 @@ mod tests {
     #[test]
     fn abi_version_is_exposed() {
         assert_eq!(kb_abi_version(), ABI_VERSION);
+    }
+
+    #[test]
+    fn loading_a_document_from_another_tenant_is_refused() {
+        let handle = open("tenant-a/board", 1);
+        call_exec(
+            handle,
+            r#"{"cmd":"add","kind":"rectangle","x":0,"y":0,"w":1,"h":1}"#,
+        );
+
+        // A document that belongs to a different scope must never land here.
+        let foreign = serde_json::to_string(&kboard_core::document::Document::new(
+            kboard_core::document::ScopeId::new("tenant-b/board"),
+        ))
+        .unwrap();
+        assert_eq!(
+            unsafe { kb_load(handle, foreign.as_ptr(), foreign.len()) },
+            STATUS_REFUSED
+        );
+        kb_close(handle);
+    }
+
+    #[test]
+    fn loading_a_document_from_the_same_scope_succeeds() {
+        let alice = open("tenant/shared", 1);
+        let bob = open("tenant/shared", 2);
+
+        call_exec(
+            alice,
+            r#"{"cmd":"add","kind":"diamond","x":3,"y":4,"w":5,"h":6}"#,
+        );
+        assert_eq!(kb_scene(alice), STATUS_OK);
+
+        let document = with_registry(|registry| {
+            serde_json::to_string(registry.boards[&alice].document()).unwrap()
+        });
+        assert_eq!(
+            unsafe { kb_load(bob, document.as_ptr(), document.len()) },
+            STATUS_OK
+        );
+
+        assert_eq!(kb_scene(bob), STATUS_OK);
+        assert!(
+            last_string().contains("diamond"),
+            "join handshake carried the scene"
+        );
+
+        kb_close(alice);
+        kb_close(bob);
     }
 }

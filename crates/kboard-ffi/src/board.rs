@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use kboard_core::clock::{ActorId, HlcGenerator};
-use kboard_core::document::{Document, ScopeId};
+use kboard_core::document::{Document, MergeError, ScopeId};
 use kboard_core::element::ElementId;
 use kboard_core::frac;
 use kboard_core::op::{self, Op, StampedOp};
@@ -139,7 +139,16 @@ impl Board {
     /// Execute a host command. Returns the affected element id, if any.
     pub fn exec(&mut self, command: &Command, now_ms: u64) -> Result<Option<String>, BoardError> {
         match command {
-            Command::Add { kind, x, y, w, h, stroke, fill, stroke_width } => {
+            Command::Add {
+                kind,
+                x,
+                y,
+                w,
+                h,
+                stroke,
+                fill,
+                stroke_width,
+            } => {
                 let element_kind = parse_kind(kind)?;
                 let id = self.mint_id();
                 let z = self.document.z_index_for_top();
@@ -163,7 +172,11 @@ impl Board {
                 Ok(Some(id.to_hex()))
             }
 
-            Command::Stroke { points, stroke, stroke_width } => {
+            Command::Stroke {
+                points,
+                stroke,
+                stroke_width,
+            } => {
                 if points.is_empty() {
                     return Err(BoardError::BadCommand("empty stroke".into()));
                 }
@@ -197,7 +210,10 @@ impl Board {
                 let element = self.require(id)?;
                 let ops = op::upsert(
                     element,
-                    [(PropKey::X, PropValue::Num(*x)), (PropKey::Y, PropValue::Num(*y))],
+                    [
+                        (PropKey::X, PropValue::Num(*x)),
+                        (PropKey::Y, PropValue::Num(*y)),
+                    ],
                     &mut self.clock,
                     now_ms,
                 );
@@ -209,7 +225,10 @@ impl Board {
                 let element = self.require(id)?;
                 let ops = op::upsert(
                     element,
-                    [(PropKey::Width, PropValue::Num(*w)), (PropKey::Height, PropValue::Num(*h))],
+                    [
+                        (PropKey::Width, PropValue::Num(*w)),
+                        (PropKey::Height, PropValue::Num(*h)),
+                    ],
                     &mut self.clock,
                     now_ms,
                 );
@@ -266,6 +285,23 @@ impl Board {
         op::apply_all(&mut self.document, ops)
     }
 
+    /// Merge a whole document — the join handshake.
+    ///
+    /// A server that has compacted its log cannot replay history it truncated,
+    /// so it sends the materialised document instead. This is also where a
+    /// misrouted board is caught: merging across scopes is refused outright.
+    ///
+    /// # Errors
+    ///
+    /// [`MergeError::ScopeMismatch`] if the incoming document belongs to a
+    /// different tenant.
+    pub fn merge_document(&mut self, incoming: &Document) -> Result<bool, MergeError> {
+        if let Some(highest) = incoming.max_stamp() {
+            self.clock.observe(highest, highest.wall);
+        }
+        self.document.merge(incoming)
+    }
+
     /// Drain the operations this replica has produced but not yet sent.
     pub fn take_pending(&mut self) -> Vec<StampedOp> {
         std::mem::take(&mut self.pending)
@@ -300,7 +336,11 @@ impl Board {
 
     /// Place a new element above everything currently visible.
     pub fn top_z(&self) -> String {
-        let highest = self.document.ordered().last().map(|e| e.z_index().to_owned());
+        let highest = self
+            .document
+            .ordered()
+            .last()
+            .map(|e| e.z_index().to_owned());
         frac::between(highest.as_deref().filter(|k| !k.is_empty()), None)
     }
 }
@@ -384,9 +424,25 @@ mod tests {
         bob.merge_ops(&alice_ops);
 
         // Now each edits a different property, concurrently.
-        alice.exec(&Command::Move { id: id.clone(), x: 99.0, y: 0.0 }, 1_100).unwrap();
-        bob.exec(&Command::Style { id: id.clone(), stroke: Some(0xABCDEF00), fill: None }, 1_100)
+        alice
+            .exec(
+                &Command::Move {
+                    id: id.clone(),
+                    x: 99.0,
+                    y: 0.0,
+                },
+                1_100,
+            )
             .unwrap();
+        bob.exec(
+            &Command::Style {
+                id: id.clone(),
+                stroke: Some(0xABCDEF00),
+                fill: None,
+            },
+            1_100,
+        )
+        .unwrap();
 
         let a_ops = alice.take_pending();
         let b_ops = bob.take_pending();
@@ -423,7 +479,14 @@ mod tests {
     #[test]
     fn commands_against_unknown_elements_are_refused() {
         let mut board = Board::open("t/b", 1);
-        let missing = board.exec(&Command::Move { id: "00".repeat(16), x: 0.0, y: 0.0 }, 1_000);
+        let missing = board.exec(
+            &Command::Move {
+                id: "00".repeat(16),
+                x: 0.0,
+                y: 0.0,
+            },
+            1_000,
+        );
         assert!(matches!(missing, Err(BoardError::UnknownElement)));
     }
 

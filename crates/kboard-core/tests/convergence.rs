@@ -48,10 +48,25 @@ fn contended_log() -> Vec<StampedOp> {
 
     let mut ops = Vec::new();
     // Same element, same property, same millisecond, different actors.
-    ops.extend(upsert(ElementId(1), [(PropKey::X, PropValue::Num(10.0))], &mut alice, 1_000));
-    ops.extend(upsert(ElementId(1), [(PropKey::X, PropValue::Num(20.0))], &mut bob, 1_000));
+    ops.extend(upsert(
+        ElementId(1),
+        [(PropKey::X, PropValue::Num(10.0))],
+        &mut alice,
+        1_000,
+    ));
+    ops.extend(upsert(
+        ElementId(1),
+        [(PropKey::X, PropValue::Num(20.0))],
+        &mut bob,
+        1_000,
+    ));
     // Same element, different properties.
-    ops.extend(upsert(ElementId(1), [(PropKey::Fill, PropValue::Color(0x00FF00FF))], &mut carol, 1_000));
+    ops.extend(upsert(
+        ElementId(1),
+        [(PropKey::Fill, PropValue::Color(0x00FF00FF))],
+        &mut carol,
+        1_000,
+    ));
     // A different element entirely.
     ops.extend(upsert(
         ElementId(2),
@@ -62,15 +77,25 @@ fn contended_log() -> Vec<StampedOp> {
     // A host-defined property.
     ops.extend(upsert(
         ElementId(2),
-        [(PropKey::Custom("kcomms:author".into()), PropValue::Text("carol".into()))],
+        [(
+            PropKey::Custom("kcomms:author".into()),
+            PropValue::Text("carol".into()),
+        )],
         &mut carol,
         1_001,
     ));
     // A delete that races an edit to the same element.
-    ops.extend(upsert(ElementId(2), [(PropKey::Y, PropValue::Num(5.0))], &mut alice, 1_002));
+    ops.extend(upsert(
+        ElementId(2),
+        [(PropKey::Y, PropValue::Num(5.0))],
+        &mut alice,
+        1_002,
+    ));
     ops.push(StampedOp::new(
         alice.tick(1_003),
-        kboard_core::op::Op::Delete { element: ElementId(2) },
+        kboard_core::op::Op::Delete {
+            element: ElementId(2),
+        },
     ));
     ops
 }
@@ -78,7 +103,11 @@ fn contended_log() -> Vec<StampedOp> {
 #[test]
 fn every_ordering_of_a_log_produces_one_document() {
     let ops = contended_log();
-    assert_eq!(ops.len(), 7, "keep this small enough to permute exhaustively");
+    assert_eq!(
+        ops.len(),
+        7,
+        "keep this small enough to permute exhaustively"
+    );
 
     let orderings = permutations(&ops);
     assert_eq!(orderings.len(), 5_040);
@@ -227,7 +256,10 @@ fn json_round_trip_preserves_the_document() {
     let decoded: Document = serde_json::from_str(&encoded).expect("document must deserialise");
 
     assert_eq!(decoded, original);
-    assert!(encoded.contains("~kcomms:author"), "custom keys keep their prefix");
+    assert!(
+        encoded.contains("~kcomms:author"),
+        "custom keys keep their prefix"
+    );
 }
 
 #[test]

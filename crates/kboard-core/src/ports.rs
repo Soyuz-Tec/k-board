@@ -112,7 +112,10 @@ pub mod memory {
 
     impl SteppingClock {
         pub const fn new(start: u64, step: u64) -> Self {
-            Self { now: Cell::new(start), step }
+            Self {
+                now: Cell::new(start),
+                step,
+            }
         }
     }
 
@@ -163,7 +166,9 @@ pub mod memory {
 
     impl Authority for RosterAuthority {
         fn may_read(&self, scope: &ScopeId, actor: ActorId) -> bool {
-            self.members.get(scope).is_some_and(|list| list.contains(&actor))
+            self.members
+                .get(scope)
+                .is_some_and(|list| list.contains(&actor))
         }
         fn may_write(&self, scope: &ScopeId, actor: ActorId) -> bool {
             self.may_read(scope, actor)
@@ -246,10 +251,20 @@ mod tests {
         let mut clock = HlcGenerator::new(ActorId(1));
         let mut log = MemoryOpLog::default();
 
-        let first = upsert(ElementId(1), [(PropKey::X, PropValue::Num(1.0))], &mut clock, 10);
+        let first = upsert(
+            ElementId(1),
+            [(PropKey::X, PropValue::Num(1.0))],
+            &mut clock,
+            10,
+        );
         let seq = log.append(&scope(), &first).unwrap();
 
-        let second = upsert(ElementId(2), [(PropKey::X, PropValue::Num(2.0))], &mut clock, 11);
+        let second = upsert(
+            ElementId(2),
+            [(PropKey::X, PropValue::Num(2.0))],
+            &mut clock,
+            11,
+        );
         log.append(&scope(), &second).unwrap();
 
         assert_eq!(log.read_since(&scope(), seq).unwrap(), second);
@@ -260,10 +275,18 @@ mod tests {
     fn op_log_isolates_scopes() {
         let mut clock = HlcGenerator::new(ActorId(1));
         let mut log = MemoryOpLog::default();
-        let ops = upsert(ElementId(1), [(PropKey::X, PropValue::Num(1.0))], &mut clock, 10);
+        let ops = upsert(
+            ElementId(1),
+            [(PropKey::X, PropValue::Num(1.0))],
+            &mut clock,
+            10,
+        );
         log.append(&ScopeId::new("tenant-a/b"), &ops).unwrap();
 
-        assert!(log.read_since(&ScopeId::new("tenant-b/b"), 0).unwrap().is_empty());
+        assert!(log
+            .read_since(&ScopeId::new("tenant-b/b"), 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

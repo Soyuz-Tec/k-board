@@ -26,7 +26,11 @@ pub struct Point {
 
 impl Point {
     pub const fn new(x: f64, y: f64) -> Self {
-        Self { x, y, pressure: 0.0 }
+        Self {
+            x,
+            y,
+            pressure: 0.0,
+        }
     }
 
     pub fn is_finite(&self) -> bool {

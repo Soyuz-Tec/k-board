@@ -30,7 +30,11 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn empty(scope: ScopeId) -> Self {
-        Self { document: Document::new(scope), through: None, absorbed: 0 }
+        Self {
+            document: Document::new(scope),
+            through: None,
+            absorbed: 0,
+        }
     }
 
     /// Fold an operation log into a document.

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>k-board</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%E2%9C%8F%EF%B8%8F</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">k&#8209;board</div>
+
+      <div class="tools" role="toolbar" aria-label="Drawing tools">
+        <button data-tool="select" class="tool" aria-pressed="true" title="Select and move (V)">
+          <span aria-hidden="true">&#9737;</span><span class="label">Select</span>
+        </button>
+        <button data-tool="rectangle" class="tool" aria-pressed="false" title="Rectangle (R)">
+          <span aria-hidden="true">&#9645;</span><span class="label">Rect</span>
+        </button>
+        <button data-tool="ellipse" class="tool" aria-pressed="false" title="Ellipse (O)">
+          <span aria-hidden="true">&#9711;</span><span class="label">Ellipse</span>
+        </button>
+        <button data-tool="diamond" class="tool" aria-pressed="false" title="Diamond (D)">
+          <span aria-hidden="true">&#9671;</span><span class="label">Diamond</span>
+        </button>
+        <button data-tool="arrow" class="tool" aria-pressed="false" title="Arrow (A)">
+          <span aria-hidden="true">&#8599;</span><span class="label">Arrow</span>
+        </button>
+        <button data-tool="freedraw" class="tool" aria-pressed="false" title="Pen (P)">
+          <span aria-hidden="true">&#9998;</span><span class="label">Pen</span>
+        </button>
+        <button data-tool="eraser" class="tool" aria-pressed="false" title="Eraser (E)">
+          <span aria-hidden="true">&#9003;</span><span class="label">Erase</span>
+        </button>
+      </div>
+
+      <div class="swatches" role="radiogroup" aria-label="Stroke colour">
+        <button class="swatch" data-colour="#1e1e1e" style="--c: #1e1e1e" role="radio" aria-checked="true" aria-label="Ink"></button>
+        <button class="swatch" data-colour="#e03131" style="--c: #e03131" role="radio" aria-checked="false" aria-label="Red"></button>
+        <button class="swatch" data-colour="#1971c2" style="--c: #1971c2" role="radio" aria-checked="false" aria-label="Blue"></button>
+        <button class="swatch" data-colour="#2f9e44" style="--c: #2f9e44" role="radio" aria-checked="false" aria-label="Green"></button>
+        <button class="swatch" data-colour="#f08c00" style="--c: #f08c00" role="radio" aria-checked="false" aria-label="Amber"></button>
+      </div>
+
+      <div class="spacer"></div>
+
+      <button id="clear" class="ghost" title="Clear the board for everyone">Clear</button>
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="dot" id="dot"></span><span id="statusText">starting</span>
+      </div>
+    </header>
+
+    <main>
+      <canvas id="canvas" aria-label="Drawing canvas"></canvas>
+
+      <!--
+        The accessibility tree. Canvas content is invisible to assistive
+        technology because it is not in the DOM; this mirrors the scene as real
+        elements so it can be read and navigated. It is not decoration.
+      -->
+      <section id="a11y" class="sr-only" aria-live="polite">
+        <h2>Canvas contents</h2>
+        <ul id="a11yList"></ul>
+      </section>
+
+      <div id="hint" class="hint">
+        <strong>Open this page in a second tab</strong> — both are separate
+        replicas. Draw in either and watch them converge.
+      </div>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
