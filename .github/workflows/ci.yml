@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build should not also cost a long incremental-compile cache write.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  verify:
+    name: test / lint / format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Warnings are failures here. This crate is linked into other people's
+      # processes; a lint we tolerate becomes a defect someone else operates.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      - name: Doc tests
+        run: cargo test --workspace --doc
+
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The whole architecture rests on one crate compiling to both native and
+      # wasm. If this job breaks, the "same merge code on client and server"
+      # guarantee is gone and the bug it prevents is back.
+      - name: Build for wasm32
+        run: cargo build --workspace --target wasm32-unknown-unknown --release
+
+  convergence:
+    name: convergence proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Called out as its own job so a regression here is unmistakable in the
+      # checks list. These are the tests that decide whether replicas can
+      # permanently disagree.
+      - name: Exhaustive convergence suite
+        run: cargo test -p kboard-core --test convergence -- --nocapture
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit

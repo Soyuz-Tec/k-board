@@ -1,0 +1,17 @@
+[package]
+name = "kboard-ffi"
+description = "C ABI surface for kboard-core. One export set serves wasm32 browsers and native host runtimes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kboard"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+kboard-core = { path = "../kboard-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
