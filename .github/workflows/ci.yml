@@ -52,11 +52,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The whole architecture rests on one crate compiling to both native and
+      # The whole architecture rests on the engine compiling to both native and
       # wasm. If this job breaks, the "same merge code on client and server"
       # guarantee is gone and the bug it prevents is back.
-      - name: Build for wasm32
-        run: cargo build --workspace --target wasm32-unknown-unknown --release
+      #
+      # Only the engine crates are built here. kboard-server is native by
+      # design — it is the standalone adapter, and its tokio/mio networking
+      # stack has no wasm32-unknown-unknown target. Building --workspace would
+      # fail for a reason that says nothing about the engine's portability.
+      - name: Build engine for wasm32
+        run: cargo build -p kboard-core -p kboard-ffi --target wasm32-unknown-unknown --release
 
   convergence:
     name: convergence proofs
