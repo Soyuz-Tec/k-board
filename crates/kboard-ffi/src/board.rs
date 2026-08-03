@@ -75,6 +75,27 @@ pub enum Command {
         w: f64,
         h: f64,
     },
+    /// Write an element's whole geometry at once.
+    ///
+    /// Resizing and rotating both move several properties that only make sense
+    /// together: a box, an angle, and — for freehand — the path itself. Sending
+    /// them as one command means one operation in the log, one entry in the
+    /// history, and no window in which an element is half-transformed.
+    ///
+    /// `Move` and `Resize` remain for the cases that genuinely change one thing.
+    Geometry {
+        id: String,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        #[serde(default)]
+        angle: Option<f64>,
+        #[serde(default)]
+        font_size: Option<f64>,
+        #[serde(default)]
+        points: Option<Vec<[f64; 2]>>,
+    },
     Style {
         id: String,
         #[serde(default)]
@@ -92,8 +113,29 @@ const fn default_stroke_width() -> f64 {
     2.0
 }
 
+const DEFAULT_FONT_SIZE: f64 = 20.0;
+
 const fn default_font_size() -> f64 {
-    20.0
+    DEFAULT_FONT_SIZE
+}
+
+/// What a reader sees when a property was never written.
+///
+/// Reversing a write to a property that did not exist means restoring what the
+/// reader *would have seen* — and that is not a guess, it is the same default
+/// [`Board::scene`] reports. Without it, undoing the first rotation of a shape
+/// leaves the shape rotated: nothing had ever set its angle, so there was
+/// nothing to put back.
+///
+/// Only properties with a meaningful default belong here. A key that is absent
+/// and has no default is genuinely unset, and inventing one would be worse than
+/// leaving it alone.
+fn read_default(key: &PropKey) -> Option<PropValue> {
+    match key {
+        PropKey::Angle => Some(PropValue::Num(0.0)),
+        PropKey::FontSize => Some(PropValue::Num(DEFAULT_FONT_SIZE)),
+        _ => None,
+    }
 }
 
 /// One element, flattened for rendering. The client never walks the CRDT.
@@ -115,6 +157,8 @@ pub struct SceneItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     pub font_size: f64,
+    /// Radians, clockwise, about the centre of the box.
+    pub angle: f64,
 }
 
 #[derive(Debug)]
@@ -231,9 +275,8 @@ impl Board {
         };
         keys.iter()
             .filter_map(|key| {
-                current
-                    .get(key)
-                    .map(|value| Reversal::Set(element, key.clone(), value.clone()))
+                let value = current.get(key).cloned().or_else(|| read_default(key))?;
+                Some(Reversal::Set(element, key.clone(), value))
             })
             .collect()
     }
@@ -428,6 +471,43 @@ impl Board {
                 Ok(Some(id.clone()))
             }
 
+            Command::Geometry {
+                id,
+                x,
+                y,
+                w,
+                h,
+                angle,
+                font_size,
+                points,
+            } => {
+                let element = self.require(id)?;
+                let mut props = vec![
+                    (PropKey::X, PropValue::Num(*x)),
+                    (PropKey::Y, PropValue::Num(*y)),
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                ];
+                if let Some(angle) = angle {
+                    props.push((PropKey::Angle, PropValue::Num(*angle)));
+                }
+                if let Some(size) = font_size {
+                    props.push((PropKey::FontSize, PropValue::Num(*size)));
+                }
+                if let Some(path) = points {
+                    // Freehand geometry lives in the path, so scaling the box
+                    // without it would leave the stroke its original size
+                    // inside a box that claims otherwise.
+                    let path: Vec<Point> = path.iter().map(|[x, y]| Point::new(*x, *y)).collect();
+                    props.push((PropKey::Points, PropValue::Points(path)));
+                }
+                let keys: Vec<PropKey> = props.iter().map(|(key, _)| key.clone()).collect();
+                let backward = self.capture(element, &keys);
+                let ops = op::upsert(element, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, mutation(element, backward, props));
+                Ok(Some(id.clone()))
+            }
+
             Command::Style { id, stroke, fill } => {
                 let element = self.require(id)?;
                 let mut props = Vec::new();
@@ -545,7 +625,8 @@ impl Board {
                     Some(PropValue::Text(text)) => Some(text.clone()),
                     _ => None,
                 },
-                font_size: element.num_or(PropKey::FontSize, 20.0),
+                font_size: element.num_or(PropKey::FontSize, DEFAULT_FONT_SIZE),
+                angle: element.num_or(PropKey::Angle, 0.0),
             })
             .collect()
     }
@@ -698,6 +779,133 @@ mod tests {
             )
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn geometry_writes_a_transform_in_one_operation() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+
+        board
+            .exec(
+                &Command::Geometry {
+                    id: id.clone(),
+                    x: 5.0,
+                    y: 6.0,
+                    w: 40.0,
+                    h: 50.0,
+                    angle: Some(0.5),
+                    font_size: None,
+                    points: None,
+                },
+                2_000,
+            )
+            .unwrap();
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!((item.x, item.y, item.w, item.h), (5.0, 6.0, 40.0, 50.0));
+        assert_eq!(item.angle, 0.5);
+    }
+
+    #[test]
+    fn undoing_a_first_rotation_puts_the_shape_back_flat() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+        // Nothing has ever written an angle, so there is no prior value to
+        // capture. Reversing to "absent" would leave the shape rotated.
+        board
+            .exec(
+                &Command::Geometry {
+                    id: id.clone(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
+                    angle: Some(1.2),
+                    font_size: None,
+                    points: None,
+                },
+                2_000,
+            )
+            .unwrap();
+        assert!(board.undo(3_000));
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(
+            item.angle, 0.0,
+            "an undone rotation must leave nothing behind"
+        );
+    }
+
+    #[test]
+    fn scaling_a_freehand_stroke_moves_its_path_too() {
+        let mut board = Board::open("t/b", 1);
+        let id = board
+            .exec(
+                &Command::Stroke {
+                    points: vec![[0.0, 0.0], [10.0, 10.0]],
+                    stroke: 0xFF,
+                    stroke_width: 2.0,
+                },
+                1_000,
+            )
+            .unwrap()
+            .unwrap();
+
+        board
+            .exec(
+                &Command::Geometry {
+                    id: id.clone(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 20.0,
+                    h: 20.0,
+                    angle: None,
+                    font_size: None,
+                    points: Some(vec![[0.0, 0.0], [20.0, 20.0]]),
+                },
+                2_000,
+            )
+            .unwrap();
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        // A box that grew without the path would leave the stroke its original
+        // size inside a box claiming otherwise.
+        assert_eq!(
+            item.points.as_deref(),
+            Some(&[[0.0, 0.0], [20.0, 20.0]][..])
+        );
+        assert_eq!(item.w, 20.0);
+    }
+
+    #[test]
+    fn every_element_reports_an_angle_even_when_none_was_written() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        // The client transforms by this value unconditionally, so it has to be
+        // a number rather than something absent.
+        assert_eq!(item.angle, 0.0);
+    }
+
+    #[test]
+    fn transforming_something_that_is_not_there_is_an_error() {
+        let mut board = Board::open("t/b", 1);
+        assert!(board
+            .exec(
+                &Command::Geometry {
+                    id: "0123456789abcdef".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                    angle: None,
+                    font_size: None,
+                    points: None,
+                },
+                1_000,
+            )
+            .is_err());
     }
 
     #[test]

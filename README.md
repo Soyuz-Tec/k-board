@@ -188,6 +188,8 @@ pixels to be painting for content to be readable.
   acts on the result
 - Text elements, edited in place through a real textarea, with the measured box
   stored on the element because the engine has no font
+- Multi-select by marquee or shift-click; move, resize and rotate a selection
+  as one thing
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
@@ -195,7 +197,6 @@ pixels to be painting for content to be readable.
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Presence: shared selection, and names rather than actor ids
 - Images
-- Multi-select, resize, rotate (copy and paste currently act on one shape)
 - Headless renderer (`lyon` → `resvg`) so a *server* can render a board without
   a browser — the client-side export above does not cover thumbnails or
   notification previews

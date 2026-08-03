@@ -8,7 +8,17 @@
  */
 
 import { loadEngine } from "./kboard.js";
-import { LINE_HEIGHT, bounds, drawShape, fontFor, pack, sceneBounds, toSvg } from "./scene.js";
+import {
+  LINE_HEIGHT,
+  bounds,
+  drawShape,
+  fontFor,
+  intoLocal,
+  pack,
+  sceneBounds,
+  toSvg,
+} from "./scene.js";
+import * as transform from "./transform.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
 import * as clipboard from "./clipboard.js";
 
@@ -38,7 +48,6 @@ const state = {
   view: { x: 0, y: 0, scale: 1 },
   scene: [],
   draft: null,
-  drag: null,
   pan: null,
   socket: null,
   outbox: [],
@@ -46,7 +55,11 @@ const state = {
   dirty: true,
   // Throwaway. Never reaches the engine, never reaches the log.
   presence: new Presence(),
-  selection: null,
+  /// Ids, not elements: the scene is replaced wholesale on every change, so
+  /// holding elements would mean holding stale copies of them.
+  selection: new Set(),
+  gesture: null,
+  marquee: null,
   pointer: null,
   // Only reached when the system clipboard is unavailable or refused.
   localClipboard: {},
@@ -61,36 +74,61 @@ function hitTest(sceneX, sceneY) {
   const slack = 6 / state.view.scale;
   // Reverse: topmost element in paint order wins.
   for (let index = state.scene.length - 1; index >= 0; index -= 1) {
-    const box = bounds(state.scene[index]);
+    const item = state.scene[index];
+    const box = bounds(item);
+    // Tested in the element's own frame. A turned element's box is not
+    // axis-aligned on the board, and comparing against the board's axes would
+    // make the clickable region drift away from the drawn one.
+    const [x, y] = intoLocal(item, sceneX, sceneY);
     if (
-      sceneX >= box.x - slack &&
-      sceneX <= box.x + box.w + slack &&
-      sceneY >= box.y - slack &&
-      sceneY <= box.y + box.h + slack
+      x >= box.x - slack &&
+      x <= box.x + box.w + slack &&
+      y >= box.y - slack &&
+      y <= box.y + box.h + slack
     ) {
-      return state.scene[index];
+      return item;
     }
   }
   return null;
 }
 
-/** The selected element, or null — read from the scene so it cannot go stale. */
+/** The selected elements, read from the scene so they cannot go stale. */
 function selected() {
-  if (state.selection === null) return null;
-  return state.scene.find((item) => item.id === state.selection) ?? null;
+  return state.scene.filter((item) => state.selection.has(item.id));
+}
+
+/** The one selected element, or null. Some actions only make sense on one. */
+function onlySelected() {
+  const items = selected();
+  return items.length === 1 ? items[0] : null;
 }
 
 /**
- * Select an element, or nothing.
+ * Replace the selection.
  *
  * Announced as well as drawn: an outline says nothing to a screen reader, and
  * every shortcut in this file acts on whatever is selected.
  */
-function select(id) {
-  if (state.selection === id) return;
-  state.selection = id;
+function select(ids) {
+  const next = new Set(ids === null ? [] : [ids].flat().filter(Boolean));
+  if (next.size === state.selection.size && [...next].every((id) => state.selection.has(id))) {
+    return;
+  }
+  state.selection = next;
   describeSelection();
   invalidate();
+}
+
+/** Add or remove one element, for shift-clicking a selection together. */
+function toggleSelected(id) {
+  const next = new Set(state.selection);
+  if (!next.delete(id)) next.add(id);
+  select([...next]);
+}
+
+/** The box the handles hang off, or null when nothing is selected. */
+function selectionBox() {
+  return transform.unionBounds(selected());
 }
 
 function toScene(clientX, clientY) {
@@ -188,7 +226,7 @@ function endTextEdit() {
         font_size: editing.size,
         stroke: pack(state.colour),
       });
-      state.selection = id;
+      select(id);
     }
     flush();
   }
@@ -213,10 +251,10 @@ function invalidate() {
  */
 function sceneChanged() {
   if (state.board !== null) state.scene = state.engine.scene(state.board);
-  // A peer may have deleted whatever was selected. Holding the id would leave
-  // Delete and Copy pointed at something that is no longer there.
-  if (state.selection !== null && !state.scene.some((item) => item.id === state.selection)) {
-    state.selection = null;
+  // A peer may have deleted something that was selected. Holding the id would
+  // leave Delete and Copy pointed at what is no longer there.
+  for (const id of state.selection) {
+    if (!state.scene.some((item) => item.id === id)) state.selection.delete(id);
   }
   describeSelection();
   describeForScreenReaders();
@@ -285,8 +323,8 @@ function render() {
   }
   if (state.draft) drawShape(context, state.draft);
 
-  const chosen = selected();
-  if (chosen) drawSelection(chosen);
+  drawSelection();
+  if (state.marquee) drawMarquee(state.marquee);
 
   // Above the drawing and outside the scene transform: a cursor is a pointer,
   // not an object on the board.
@@ -295,20 +333,69 @@ function render() {
 }
 
 /**
- * Outline the selection.
+ * Outline the selection and hang the handles off it.
  *
- * Drawn in scene space so it tracks the shape, but with a width divided by the
- * zoom so it stays one hairline at any magnification — an outline that thickens
- * as you zoom in stops reading as an annotation and starts looking drawn on.
+ * Drawn in scene space so it tracks the shapes, but with widths divided by the
+ * zoom so they stay one size at any magnification — an outline that thickens as
+ * you zoom in stops reading as an annotation and starts looking drawn on.
  */
-function drawSelection(item) {
-  const box = bounds(item);
-  const pad = 4 / state.view.scale;
+function drawSelection() {
+  const items = selected();
+  if (items.length === 0) return;
+  const scale = state.view.scale;
+  const box = transform.unionBounds(items);
+
   context.save();
   context.strokeStyle = "#1971c2";
-  context.lineWidth = 1.5 / state.view.scale;
-  context.setLineDash([5 / state.view.scale, 4 / state.view.scale]);
+  context.lineWidth = 1.5 / scale;
+
+  // Each member is outlined as well as the group, so a selection of three
+  // scattered shapes does not read as one large empty rectangle.
+  if (items.length > 1) {
+    context.setLineDash([3 / scale, 3 / scale]);
+    context.globalAlpha = 0.5;
+    for (const item of items) {
+      const own = transform.unionBounds([item]);
+      context.strokeRect(own.x, own.y, own.w, own.h);
+    }
+    context.globalAlpha = 1;
+  }
+
+  const pad = 4 / scale;
+  context.setLineDash([5 / scale, 4 / scale]);
   context.strokeRect(box.x - pad, box.y - pad, box.w + pad * 2, box.h + pad * 2);
+
+  context.setLineDash([]);
+  const size = 7 / scale;
+  for (const handle of transform.handles(box)) {
+    context.beginPath();
+    if (handle.name === "rotate") {
+      // Round, and joined to the box by a stem, so it reads as a different
+      // kind of control rather than a ninth way to resize.
+      context.moveTo(box.x + box.w / 2, box.y);
+      context.lineTo(handle.x, handle.y);
+      context.stroke();
+      context.beginPath();
+      context.arc(handle.x, handle.y, size / 2, 0, Math.PI * 2);
+    } else {
+      context.rect(handle.x - size / 2, handle.y - size / 2, size, size);
+    }
+    context.fillStyle = "#ffffff";
+    context.fill();
+    context.stroke();
+  }
+  context.restore();
+}
+
+function drawMarquee(box) {
+  const scale = state.view.scale;
+  context.save();
+  context.strokeStyle = "#1971c2";
+  context.fillStyle = "rgba(25,113,194,0.08)";
+  context.lineWidth = 1 / scale;
+  context.setLineDash([4 / scale, 3 / scale]);
+  context.fillRect(box.x, box.y, box.w, box.h);
+  context.strokeRect(box.x, box.y, box.w, box.h);
   context.restore();
 }
 
@@ -365,10 +452,18 @@ function describeForScreenReaders() {
 }
 
 function describeSelection() {
-  const chosen = selected();
-  const readout = chosen
-    ? `Selected: ${chosen.kind}, ${describeItem(chosen)}.`
-    : "Nothing selected.";
+  const items = selected();
+  let readout = "Nothing selected.";
+  if (items.length === 1) {
+    readout = `Selected: ${items[0].kind}, ${describeItem(items[0])}.`;
+  } else if (items.length > 1) {
+    // Counted by kind rather than listed: "seven rectangles" is what someone
+    // needs to hear, and seven near-identical sentences is not.
+    const tally = new Map();
+    for (const item of items) tally.set(item.kind, (tally.get(item.kind) ?? 0) + 1);
+    const parts = [...tally].map(([kind, count]) => `${count} ${kind}${count === 1 ? "" : "s"}`);
+    readout = `Selected ${items.length} elements: ${parts.join(", ")}.`;
+  }
   if (selectionText.textContent !== readout) selectionText.textContent = readout;
 }
 
@@ -483,22 +578,24 @@ function connect() {
  */
 function insert(elements) {
   if (state.board === null || elements.length === 0) return;
-  let last = null;
+  const added = [];
   for (const element of elements) {
-    last = state.engine.exec(state.board, clipboard.toCommand(element));
+    added.push(state.engine.exec(state.board, clipboard.toCommand(element)));
   }
   flush();
   sceneChanged();
-  select(last);
+  // Everything that was added, so a paste of five shapes can immediately be
+  // dragged as the five shapes that were pasted.
+  select(added);
 }
 
 async function copySelection({ cut = false } = {}) {
   const chosen = selected();
-  if (!chosen) return;
+  if (chosen.length === 0) return;
 
-  const where = await clipboard.writeText(clipboard.serialise([chosen]), state.localClipboard);
+  const where = await clipboard.writeText(clipboard.serialise(chosen), state.localClipboard);
   if (cut) {
-    state.engine.exec(state.board, { cmd: "delete", id: chosen.id });
+    for (const item of chosen) state.engine.exec(state.board, { cmd: "delete", id: item.id });
     flush();
     sceneChanged();
   }
@@ -522,15 +619,15 @@ async function paste() {
 /** A copy without involving the clipboard, so it cannot clobber what is on it. */
 function duplicateSelection() {
   const chosen = selected();
-  if (!chosen) return;
-  const copied = clipboard.parse(clipboard.serialise([chosen]));
+  if (chosen.length === 0) return;
+  const copied = clipboard.parse(clipboard.serialise(chosen));
   if (copied) insert(clipboard.place(copied, null));
 }
 
 function deleteSelection() {
   const chosen = selected();
-  if (!chosen) return;
-  state.engine.exec(state.board, { cmd: "delete", id: chosen.id });
+  if (chosen.length === 0) return;
+  for (const item of chosen) state.engine.exec(state.board, { cmd: "delete", id: item.id });
   flush();
   sceneChanged();
 }
@@ -549,6 +646,64 @@ function reportCursor(x, y) {
   if (state.socket?.readyState !== WebSocket.OPEN) return;
   if (!state.presence.shouldReport(x, y, performance.now())) return;
   state.socket.send(JSON.stringify({ type: "presence", x, y }));
+}
+
+// -- gestures --------------------------------------------------------------
+
+/**
+ * Write a transform to the engine.
+ *
+ * One `geometry` command per element rather than a move and a resize and a
+ * rotate: they only make sense together, and sending them apart would put a
+ * half-transformed shape in the log and three entries in the history where the
+ * user made one gesture.
+ *
+ * It also fixes freehand, whose visible geometry is its path — a `move` that
+ * wrote only x and y left the stroke exactly where it was while its box walked
+ * off without it.
+ */
+function applyGeometry(changes) {
+  for (const change of changes) {
+    state.engine.exec(state.board, { cmd: "geometry", ...change });
+  }
+  flush();
+  sceneChanged();
+}
+
+/** Begin a drag on the selection: move, resize, or rotate. */
+function beginGesture(kind, x, y, handle = null) {
+  const items = selected();
+  const box = transform.unionBounds(items);
+  state.gesture = {
+    kind,
+    handle,
+    box,
+    // Snapshotted at the start and transformed from there every frame. Applying
+    // each frame's delta to the previous result would accumulate the rounding
+    // of every intermediate step across a long drag.
+    items,
+    origin: { x, y },
+    pivot: { x: box.x + box.w / 2, y: box.y + box.h / 2 },
+    startAngle: Math.atan2(y - (box.y + box.h / 2), x - (box.x + box.w / 2)),
+    lastCommit: 0,
+  };
+}
+
+/** What the current gesture would produce at this pointer position. */
+function gestureResult(x, y) {
+  const gesture = state.gesture;
+  if (gesture.kind === "move") {
+    return transform.translate(gesture.items, x - gesture.origin.x, y - gesture.origin.y);
+  }
+  if (gesture.kind === "resize") {
+    return transform.resize(
+      gesture.items,
+      gesture.box,
+      transform.boxFromDrag(gesture.box, gesture.handle, x, y),
+    );
+  }
+  const angle = Math.atan2(y - gesture.pivot.y, x - gesture.pivot.x);
+  return transform.rotate(gesture.items, gesture.pivot, angle - gesture.startAngle);
 }
 
 // -- input -----------------------------------------------------------------
@@ -598,8 +753,9 @@ canvas.addEventListener("pointerdown", (event) => {
 
   const [x, y] = toScene(event.clientX, event.clientY);
 
-  // Middle button or space-drag pans regardless of the active tool.
-  if (event.button === 1 || event.shiftKey) {
+  // Middle button or Alt pans regardless of the active tool. Shift used to,
+  // and now extends the selection instead — a modifier cannot do both.
+  if (event.button === 1 || event.altKey) {
     state.pan = { startX: event.clientX, startY: event.clientY, ...state.view };
     return;
   }
@@ -629,17 +785,32 @@ canvas.addEventListener("pointerdown", (event) => {
   }
 
   if (state.tool === "select") {
+    // Handles are tested first: they sit on top of the shapes they belong to,
+    // and a corner handle overlapping another element must resize rather than
+    // select whatever is underneath it.
+    const box = selectionBox();
+    if (box) {
+      const handle = transform.handleAt(box, x, y, transform.HANDLE_GRAB / state.view.scale);
+      if (handle) {
+        beginGesture(handle === "rotate" ? "rotate" : "resize", x, y, handle);
+        return;
+      }
+    }
+
     const target = hitTest(x, y);
-    select(target?.id ?? null);
+    if (event.shiftKey) {
+      if (target) toggleSelected(target.id);
+      return;
+    }
     if (target) {
-      state.drag = {
-        id: target.id,
-        offsetX: x - target.x,
-        offsetY: y - target.y,
-        lastCommit: 0,
-      };
+      // Clicking a member of a multiple selection drags the whole thing, which
+      // is what grabbing one of several selected shapes means.
+      if (!state.selection.has(target.id)) select(target.id);
+      beginGesture("move", x, y);
     } else {
-      state.pan = { startX: event.clientX, startY: event.clientY, ...state.view };
+      select(null);
+      state.marquee = { x, y, w: 0, h: 0, originX: x, originY: y };
+      invalidate();
     }
     return;
   }
@@ -678,20 +849,22 @@ canvas.addEventListener("pointermove", (event) => {
   state.pointer = { x, y };
   reportCursor(x, y);
 
-  if (state.drag) {
+  if (state.marquee) {
+    state.marquee.x = Math.min(state.marquee.originX, x);
+    state.marquee.y = Math.min(state.marquee.originY, y);
+    state.marquee.w = Math.abs(x - state.marquee.originX);
+    state.marquee.h = Math.abs(y - state.marquee.originY);
+    invalidate();
+    return;
+  }
+
+  if (state.gesture) {
     const now = performance.now();
     // Throttled rather than per-frame: peers should see the drag happening,
     // without one drag becoming a thousand operations in the durable log.
-    if (now - state.drag.lastCommit > COMMIT_INTERVAL_MS) {
-      state.drag.lastCommit = now;
-      state.engine.exec(state.board, {
-        cmd: "move",
-        id: state.drag.id,
-        x: x - state.drag.offsetX,
-        y: y - state.drag.offsetY,
-      });
-      flush();
-      sceneChanged();
+    if (now - state.gesture.lastCommit > COMMIT_INTERVAL_MS) {
+      state.gesture.lastCommit = now;
+      applyGeometry(gestureResult(x, y));
     }
     return;
   }
@@ -718,17 +891,23 @@ function endPointer(event) {
     state.pan = null;
     return;
   }
-  if (state.drag) {
+  if (state.marquee) {
+    const marquee = state.marquee;
+    state.marquee = null;
+    // A click, not a drag. Clearing the selection already happened on the way
+    // down; selecting nothing again here would be the same answer twice.
+    if (marquee.w >= 1 || marquee.h >= 1) {
+      select(state.scene.filter((item) => transform.intersects(item, marquee)).map((i) => i.id));
+    }
+    invalidate();
+    return;
+  }
+  if (state.gesture) {
     const [x, y] = toScene(event.clientX, event.clientY);
-    state.engine.exec(state.board, {
-      cmd: "move",
-      id: state.drag.id,
-      x: x - state.drag.offsetX,
-      y: y - state.drag.offsetY,
-    });
-    state.drag = null;
-    flush();
-    sceneChanged();
+    // Applied once more unthrottled, so where the pointer finished is where the
+    // shapes finish rather than wherever the last throttled frame landed.
+    applyGeometry(gestureResult(x, y));
+    state.gesture = null;
     return;
   }
   commitDraft();
@@ -920,7 +1099,7 @@ window.addEventListener("keydown", (event) => {
     if (key === "c" || key === "x") {
       // Only claimed when something is selected, so the browser's own copy of
       // selected page text still works when the board is not the subject.
-      if (!selected()) return;
+      if (selected().length === 0) return;
       event.preventDefault();
       copySelection({ cut: key === "x" });
       return;
@@ -935,11 +1114,16 @@ window.addEventListener("keydown", (event) => {
       duplicateSelection();
       return;
     }
+    if (key === "a") {
+      event.preventDefault();
+      select(state.scene.map((item) => item.id));
+      return;
+    }
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
 
   if (event.key === "Delete" || event.key === "Backspace") {
-    if (!selected()) return;
+    if (selected().length === 0) return;
     event.preventDefault();
     deleteSelection();
     return;
@@ -953,7 +1137,8 @@ window.addEventListener("keydown", (event) => {
   // toolbar for everyone else.
   if (event.key === "Tab" && document.activeElement === canvas && state.scene.length > 0) {
     event.preventDefault();
-    const at = state.scene.findIndex((item) => item.id === state.selection);
+    const only = onlySelected();
+    const at = only ? state.scene.findIndex((item) => item.id === only.id) : -1;
     const count = state.scene.length;
     const step = event.shiftKey ? -1 : 1;
     // With nothing selected, forwards starts at the first element and
