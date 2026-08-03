@@ -94,9 +94,18 @@ for (const bad of [0, -1]) {
   );
 }
 
+// Captured rather than assumed. An earlier version of this asserted the value
+// returned to 1, which was only true of an element the clamping checks above
+// had not already been left at 0.
+engine.exec(board, { cmd: "style", id, opacity: 0.8 });
+const beforeFade = look().opacity;
 engine.exec(board, { cmd: "style", id, opacity: 0.5 });
 engine.undo(board);
-check("undoing a fade restores the previous value", look().opacity === 1, `${look().opacity}`);
+check(
+  "undoing a fade restores the previous value",
+  look().opacity === beforeFade,
+  `${look().opacity}, expected ${beforeFade}`,
+);
 
 // -- and what an export makes of it ---------------------------------------
 
