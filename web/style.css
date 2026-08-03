@@ -9,6 +9,18 @@
   --grid: #eceef0;
   --live: #2f9e44;
   --offline: #e8590c;
+
+  /* The drawing surface, deliberately outside the theme below.
+
+     A board is shared and exported, so its background cannot depend on whose
+     laptop is in dark mode — and every colour in the palette is chosen to read
+     on white. Before this, the default ink (#1e1e1e) sat on a #121212 page in
+     dark mode at a contrast ratio of about 1.05:1, which is to say invisible.
+
+     A per-board background colour would be the real answer. This is the honest
+     version of not having one yet. */
+  --canvas: #ffffff;
+  --canvas-grid: #eceef0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +35,7 @@
     --grid: #1d1d21;
     --live: #51cf66;
     --offline: #ff922b;
+    /* --canvas and --canvas-grid are deliberately not overridden here. */
   }
 }
 
@@ -192,12 +205,65 @@ canvas {
   display: block;
   width: 100%;
   height: 100%;
+  background: var(--canvas);
   touch-action: none;
   cursor: crosshair;
 }
 
 canvas.select-mode {
   cursor: default;
+}
+
+.widths {
+  display: flex;
+  gap: 2px;
+}
+
+.width {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.width span {
+  width: 14px;
+  border-radius: 2px;
+  background: var(--text);
+}
+
+.width[data-width="1"] span { height: 1px; }
+.width[data-width="2"] span { height: 2px; }
+.width[data-width="5"] span { height: 5px; }
+
+.width[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* A diagonal through an empty square: the conventional "no colour" marker, and
+   the only swatch that has to read as an absence rather than a colour. */
+.swatch.none {
+  background:
+    linear-gradient(to top right, transparent 46%, var(--offline) 46%, var(--offline) 54%, transparent 54%),
+    var(--panel);
+}
+
+.opacity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.opacity input {
+  width: 72px;
 }
 
 #editor {

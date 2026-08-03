@@ -96,12 +96,19 @@ pub enum Command {
         #[serde(default)]
         points: Option<Vec<[f64; 2]>>,
     },
+    /// Change how an element looks. Every field is optional: a host changing
+    /// only the fill must not have to resend a colour it never touched, or it
+    /// would overwrite a peer's concurrent restyle with a stale value.
     Style {
         id: String,
         #[serde(default)]
         stroke: Option<u32>,
         #[serde(default)]
         fill: Option<u32>,
+        #[serde(default)]
+        stroke_width: Option<f64>,
+        #[serde(default)]
+        opacity: Option<f64>,
     },
     Delete {
         id: String,
@@ -114,6 +121,7 @@ const fn default_stroke_width() -> f64 {
 }
 
 const DEFAULT_FONT_SIZE: f64 = 20.0;
+const DEFAULT_OPACITY: f64 = 1.0;
 
 const fn default_font_size() -> f64 {
     DEFAULT_FONT_SIZE
@@ -134,6 +142,7 @@ fn read_default(key: &PropKey) -> Option<PropValue> {
     match key {
         PropKey::Angle => Some(PropValue::Num(0.0)),
         PropKey::FontSize => Some(PropValue::Num(DEFAULT_FONT_SIZE)),
+        PropKey::Opacity => Some(PropValue::Num(DEFAULT_OPACITY)),
         _ => None,
     }
 }
@@ -159,6 +168,8 @@ pub struct SceneItem {
     pub font_size: f64,
     /// Radians, clockwise, about the centre of the box.
     pub angle: f64,
+    /// 0 to 1. Multiplies both stroke and fill.
+    pub opacity: f64,
 }
 
 #[derive(Debug)]
@@ -508,7 +519,13 @@ impl Board {
                 Ok(Some(id.clone()))
             }
 
-            Command::Style { id, stroke, fill } => {
+            Command::Style {
+                id,
+                stroke,
+                fill,
+                stroke_width,
+                opacity,
+            } => {
                 let element = self.require(id)?;
                 let mut props = Vec::new();
                 if let Some(colour) = stroke {
@@ -516,6 +533,24 @@ impl Board {
                 }
                 if let Some(colour) = fill {
                     props.push((PropKey::Fill, PropValue::Color(*colour)));
+                }
+                if let Some(width) = stroke_width {
+                    if !width.is_finite() || *width <= 0.0 {
+                        return Err(BoardError::BadCommand(format!(
+                            "stroke width {width} is not drawable"
+                        )));
+                    }
+                    props.push((PropKey::StrokeWidth, PropValue::Num(*width)));
+                }
+                if let Some(alpha) = opacity {
+                    if !alpha.is_finite() {
+                        return Err(BoardError::BadCommand("opacity is not a number".into()));
+                    }
+                    // Clamped rather than refused: a slider that overshoots by a
+                    // rounding error is not a mistake worth failing an edit for,
+                    // and every value outside the range means the same thing as
+                    // its nearest edge.
+                    props.push((PropKey::Opacity, PropValue::Num(alpha.clamp(0.0, 1.0))));
                 }
                 let keys: Vec<PropKey> = props.iter().map(|(key, _)| key.clone()).collect();
                 let backward = self.capture(element, &keys);
@@ -627,6 +662,7 @@ impl Board {
                 },
                 font_size: element.num_or(PropKey::FontSize, DEFAULT_FONT_SIZE),
                 angle: element.num_or(PropKey::Angle, 0.0),
+                opacity: element.num_or(PropKey::Opacity, DEFAULT_OPACITY),
             })
             .collect()
     }
@@ -779,6 +815,111 @@ mod tests {
             )
             .unwrap()
             .unwrap()
+    }
+
+    fn restyle(board: &mut Board, command: Command) {
+        board.exec(&command, 2_000).unwrap();
+    }
+
+    #[test]
+    fn styling_only_writes_what_was_asked_for() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+
+        restyle(
+            &mut board,
+            Command::Style {
+                id: id.clone(),
+                stroke: None,
+                fill: Some(0xFF0000FF),
+                stroke_width: None,
+                opacity: None,
+            },
+        );
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.fill, 0xFF0000FF);
+        // Untouched, not reset. Resending a field the host never changed would
+        // overwrite a peer's concurrent restyle with a stale value.
+        assert_eq!(item.stroke, 0xFF);
+        assert_eq!(item.stroke_width, 2.0);
+        assert_eq!(item.opacity, 1.0);
+    }
+
+    #[test]
+    fn opacity_is_clamped_rather_than_refused() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+
+        for (given, expected) in [(1.5, 1.0), (-0.5, 0.0), (0.4, 0.4)] {
+            restyle(
+                &mut board,
+                Command::Style {
+                    id: id.clone(),
+                    stroke: None,
+                    fill: None,
+                    stroke_width: None,
+                    opacity: Some(given),
+                },
+            );
+            let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+            assert_eq!(item.opacity, expected, "opacity {given}");
+        }
+    }
+
+    #[test]
+    fn an_undrawable_stroke_width_is_refused() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+
+        for bad in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            let result = board.exec(
+                &Command::Style {
+                    id: id.clone(),
+                    stroke: None,
+                    fill: None,
+                    stroke_width: Some(bad),
+                    opacity: None,
+                },
+                2_000,
+            );
+            assert!(result.is_err(), "stroke width {bad} should be refused");
+        }
+        // The refusals left nothing behind.
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.stroke_width, 2.0);
+    }
+
+    #[test]
+    fn undoing_a_first_fade_puts_the_element_back_solid() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+        // Nothing has ever written an opacity, so there is no prior value to
+        // capture and reversal has to fall back to what a reader would see.
+        restyle(
+            &mut board,
+            Command::Style {
+                id: id.clone(),
+                stroke: None,
+                fill: None,
+                stroke_width: None,
+                opacity: Some(0.25),
+            },
+        );
+        assert!(board.undo(3_000));
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.opacity, 1.0);
+    }
+
+    #[test]
+    fn every_element_reports_an_opacity_even_when_none_was_written() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        // The client multiplies by this unconditionally, so it has to be a
+        // number rather than something absent.
+        assert_eq!(item.opacity, 1.0);
     }
 
     #[test]
@@ -1082,6 +1223,8 @@ mod tests {
                 id: id.clone(),
                 stroke: Some(0xABCDEF00),
                 fill: None,
+                stroke_width: None,
+                opacity: None,
             },
             1_100,
         )

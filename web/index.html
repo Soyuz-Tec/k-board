@@ -41,13 +41,38 @@
         </button>
       </div>
 
+      <!--
+        Every control here does two things: it restyles whatever is selected,
+        and it becomes the style of the next thing drawn. Splitting those into
+        separate controls is the arrangement where people restyle a shape and
+        then wonder why the next one came out with the old colour.
+      -->
       <div class="swatches" role="radiogroup" aria-label="Stroke colour">
-        <button class="swatch" data-colour="#1e1e1e" style="--c: #1e1e1e" role="radio" aria-checked="true" aria-label="Ink"></button>
-        <button class="swatch" data-colour="#e03131" style="--c: #e03131" role="radio" aria-checked="false" aria-label="Red"></button>
-        <button class="swatch" data-colour="#1971c2" style="--c: #1971c2" role="radio" aria-checked="false" aria-label="Blue"></button>
-        <button class="swatch" data-colour="#2f9e44" style="--c: #2f9e44" role="radio" aria-checked="false" aria-label="Green"></button>
-        <button class="swatch" data-colour="#f08c00" style="--c: #f08c00" role="radio" aria-checked="false" aria-label="Amber"></button>
+        <button class="swatch" data-colour="#1e1e1e" style="--c: #1e1e1e" role="radio" aria-checked="true" aria-label="Ink stroke"></button>
+        <button class="swatch" data-colour="#e03131" style="--c: #e03131" role="radio" aria-checked="false" aria-label="Red stroke"></button>
+        <button class="swatch" data-colour="#1971c2" style="--c: #1971c2" role="radio" aria-checked="false" aria-label="Blue stroke"></button>
+        <button class="swatch" data-colour="#2f9e44" style="--c: #2f9e44" role="radio" aria-checked="false" aria-label="Green stroke"></button>
+        <button class="swatch" data-colour="#f08c00" style="--c: #f08c00" role="radio" aria-checked="false" aria-label="Amber stroke"></button>
       </div>
+
+      <div class="swatches" role="radiogroup" aria-label="Fill colour">
+        <button class="swatch none" data-fill="none" role="radio" aria-checked="true" aria-label="No fill"></button>
+        <button class="swatch" data-fill="#ffc9c9" style="--c: #ffc9c9" role="radio" aria-checked="false" aria-label="Red fill"></button>
+        <button class="swatch" data-fill="#a5d8ff" style="--c: #a5d8ff" role="radio" aria-checked="false" aria-label="Blue fill"></button>
+        <button class="swatch" data-fill="#b2f2bb" style="--c: #b2f2bb" role="radio" aria-checked="false" aria-label="Green fill"></button>
+        <button class="swatch" data-fill="#ffec99" style="--c: #ffec99" role="radio" aria-checked="false" aria-label="Amber fill"></button>
+      </div>
+
+      <div class="widths" role="radiogroup" aria-label="Stroke width">
+        <button class="width" data-width="1" role="radio" aria-checked="false" aria-label="Thin stroke"><span aria-hidden="true"></span></button>
+        <button class="width" data-width="2" role="radio" aria-checked="true" aria-label="Medium stroke"><span aria-hidden="true"></span></button>
+        <button class="width" data-width="5" role="radio" aria-checked="false" aria-label="Thick stroke"><span aria-hidden="true"></span></button>
+      </div>
+
+      <label class="opacity">
+        <span class="label">Opacity</span>
+        <input id="opacity" type="range" min="10" max="100" step="10" value="100" aria-label="Opacity, percent" />
+      </label>
 
       <div class="history">
         <button id="undo" class="ghost" disabled title="Undo (Ctrl+Z)">Undo</button>
