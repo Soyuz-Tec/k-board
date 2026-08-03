@@ -20,6 +20,17 @@ KBOARD_DB=boards.db cargo run -p kboard-server
 Without `KBOARD_DB` the store is in-memory and boards vanish on restart; the
 boot banner tells you which mode you are in.
 
+To run it anywhere other than loopback, authentication is required:
+
+```bash
+export KBOARD_SECRET="something long and random"
+cargo run -p kboard-server -- --token my-board   # prints a grant
+KBOARD_BIND=0.0.0.0 cargo run -p kboard-server
+```
+
+Then open `/?token=<grant>`. A grant opens one scope and expires; it travels as
+a WebSocket subprotocol rather than a query parameter on the socket URL.
+
 Open <http://127.0.0.1:8080> in **two tabs**. Each tab is an independent
 replica with its own copy of the document. Draw in either one.
 
@@ -166,11 +177,12 @@ pixels to be painting for content to be readable.
   ports, with boards restored on join ([ADR-0007](docs/adr/0007-sqlite-durable-storage.md))
 - Undo/redo, per actor, as fresh writes of prior values — so a reversal
   converges like any other edit and reaches collaborators
+- Per-scope bearer authentication, enforced on the WebSocket handshake, with a
+  loopback-only refusal when no secret is set
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
-- Authentication in the standalone server
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Headless renderer (`lyon` → `resvg`) for server-side SVG/PNG
 - GPU renderer (`wgpu`/`vello`) with a WebGL2 fallback
@@ -192,9 +204,10 @@ pixels to be painting for content to be readable.
 
 ## Not production
 
-- **`authorize()` in `kboard-server` returns `true` for everyone.** It is marked
-  as the seam where a real deployment authenticates. This is the single reason
-  the server cannot face a public network.
+- Authentication is opt-in: set `KBOARD_SECRET` and mint per-scope grants with
+  `--token <scope>`. Without a secret the server refuses to bind anything but
+  loopback, so running open is a development convenience rather than an
+  unauthenticated writable store on a network.
 - Boards are durable when `KBOARD_DB` is set; without it the store is
   in-memory and they are lost on restart. The boot banner says which.
 

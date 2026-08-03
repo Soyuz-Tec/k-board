@@ -34,6 +34,7 @@ const state = {
   pan: null,
   socket: null,
   outbox: [],
+  everConnected: false,
   dirty: true,
 };
 
@@ -312,13 +313,18 @@ function flush() {
 
 function connect() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(
-    `${protocol}://${location.host}/ws/${encodeURIComponent(state.scope)}`,
-  );
+  const url = `${protocol}://${location.host}/ws/${encodeURIComponent(state.scope)}`;
+  // Offered as a subprotocol rather than a query parameter: a URL ends up in
+  // server logs, browser history, and referrers. An open server ignores it.
+  const token = new URLSearchParams(location.search).get("token");
+  const socket = token
+    ? new WebSocket(url, [`kboard.token.${token}`])
+    : new WebSocket(url);
   state.socket = socket;
   setStatus("", "connecting");
 
   socket.onopen = () => {
+    state.everConnected = true;
     setStatus("live", `live · ${state.scope}`);
     flush();
   };
@@ -343,7 +349,14 @@ function connect() {
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = (event) => {
+    // 1008/1006 after an immediate close usually means the handshake was
+    // refused. Retrying forever against a rejected token looks like a network
+    // problem to the user, so name it.
+    if (!state.everConnected) {
+      setStatus("offline", "offline · not authorised for this board");
+      return;
+    }
     setStatus("offline", "offline · edits are queued");
     // Reconnect, and keep drawing meanwhile. The queue drains on reopen.
     setTimeout(connect, 1200);

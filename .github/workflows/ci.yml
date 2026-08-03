@@ -142,6 +142,12 @@ jobs:
       - name: Restart durability
         run: node scripts/restart-durability-check.mjs
 
+      # The unit tests prove the token maths. This proves the running server
+      # turns an unauthenticated handshake away, and will not start at all in
+      # the one configuration where being open is dangerous.
+      - name: Authentication
+        run: node scripts/auth-check.mjs
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
