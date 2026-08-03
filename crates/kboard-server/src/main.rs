@@ -205,6 +205,24 @@ async fn main() {
         }
     }
 
+    let bind: IpAddr = std::env::var("KBOARD_BIND")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+    // Checked before a database is opened or a port is bound: an open server on
+    // loopback is a development convenience, while an open server on any other
+    // interface is an unauthenticated writable store on a network. That is not
+    // a configuration to warn about.
+    if !authority.permits_bind(bind) {
+        eprintln!(
+            "k-board: refusing to bind {bind} without authentication. \
+             Set KBOARD_SECRET, or bind loopback."
+        );
+        std::process::exit(1);
+    }
+    let enforcing = authority.is_enforcing();
+
     // Durability is always on; whether it survives the process depends on
     // whether a path was given. One code path either way, so the in-memory
     // case cannot drift from the durable one.
@@ -244,23 +262,6 @@ async fn main() {
         .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
-    let bind: IpAddr = std::env::var("KBOARD_BIND")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-
-    // The refusal is here rather than at every request: an open server on
-    // loopback is a development convenience, while an open server on any other
-    // interface is an unauthenticated writable store on a network. That is not
-    // a configuration to warn about.
-    if !state.authority.permits_bind(bind) {
-        eprintln!(
-            "k-board: refusing to bind {bind} without authentication. \
-             Set KBOARD_SECRET, or bind loopback."
-        );
-        std::process::exit(1);
-    }
-
     let address = SocketAddr::new(bind, port);
     let listener = match tokio::net::TcpListener::bind(address).await {
         Ok(listener) => listener,
@@ -276,7 +277,7 @@ async fn main() {
         Some(path) => println!("  storing boards in {path}"),
         None => println!("  WARNING: in-memory store — boards are lost on restart (set KBOARD_DB)"),
     }
-    if state.authority.is_enforcing() {
+    if enforcing {
         println!("  authentication required; mint a grant with --token <scope>");
     } else {
         println!("  WARNING: no authentication — loopback only (set KBOARD_SECRET)");

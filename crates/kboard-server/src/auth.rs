@@ -133,8 +133,7 @@ impl Authority {
         // comparison: an attacker must not learn how much of a forged
         // signature was right, nor reach the parser with an unsigned payload.
         let expected = sign(secret, encoded.as_bytes());
-        if presented.len() != expected.len()
-            || !bool::from(constant_time_eq(&presented, &expected))
+        if presented.len() != expected.len() || !bool::from(constant_time_eq(&presented, &expected))
         {
             return Err(Denied::BadSignature);
         }
@@ -181,14 +180,18 @@ mod tests {
     #[test]
     fn a_minted_token_opens_its_own_scope() {
         let authority = Authority::with_secret("correct horse battery staple");
-        let token = authority.mint("tenant-a/board", DEFAULT_TTL_SECONDS).unwrap();
+        let token = authority
+            .mint("tenant-a/board", DEFAULT_TTL_SECONDS)
+            .unwrap();
         assert_eq!(authority.verify(Some(&token), "tenant-a/board"), Ok(()));
     }
 
     #[test]
     fn a_token_does_not_open_another_scope() {
         let authority = Authority::with_secret("secret");
-        let token = authority.mint("tenant-a/board", DEFAULT_TTL_SECONDS).unwrap();
+        let token = authority
+            .mint("tenant-a/board", DEFAULT_TTL_SECONDS)
+            .unwrap();
         // This is what makes the scope in the URL untrusted input rather than
         // an authorisation decision.
         assert_eq!(
@@ -223,7 +226,8 @@ mod tests {
 
         // A payload claiming a different scope, carrying the original
         // signature. Rewriting claims must fail on the signature.
-        let forged_payload = URL_SAFE_NO_PAD.encode(br#"{"scope":"other/board","exp":99999999999}"#);
+        let forged_payload =
+            URL_SAFE_NO_PAD.encode(br#"{"scope":"other/board","exp":99999999999}"#);
         let forged = format!("{forged_payload}.{signature}");
         assert_eq!(
             authority.verify(Some(&forged), "other/board"),
@@ -235,7 +239,10 @@ mod tests {
     fn malformed_tokens_are_refused_rather_than_panicking() {
         let authority = Authority::with_secret("secret");
         for candidate in ["", ".", "no-dot", "!!!.!!!", "a.b"] {
-            assert!(authority.verify(Some(candidate), "t/b").is_err(), "{candidate}");
+            assert!(
+                authority.verify(Some(candidate), "t/b").is_err(),
+                "{candidate}"
+            );
         }
         assert_eq!(authority.verify(None, "t/b"), Err(Denied::Missing));
     }
