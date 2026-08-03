@@ -144,12 +144,39 @@ enum ServerMessage<'a> {
     Ops {
         ops: &'a [StampedOp],
     },
+    /// Where a peer's pointer is. Never merged, never stored — see the note on
+    /// `ClientMessage::Presence`.
+    Presence {
+        actor: u64,
+        x: f64,
+        y: f64,
+    },
+    /// A peer's connection ended, so its cursor should stop being drawn.
+    Left {
+        actor: u64,
+    },
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Ops { ops: Vec<StampedOp> },
+    Ops {
+        ops: Vec<StampedOp>,
+    },
+    /// A cursor position.
+    ///
+    /// Deliberately not an operation. Presence is ephemeral: it is relayed to
+    /// whoever is currently connected and then forgotten. Routing it through
+    /// the document would make every mouse movement a durable write, grow the
+    /// log without bound, and leave the cursor of someone who disconnected in
+    /// the board forever.
+    ///
+    /// The actor id is *not* accepted from the client — the server stamps the
+    /// one it allocated, so a connection cannot move somebody else's cursor.
+    Presence {
+        x: f64,
+        y: f64,
+    },
 }
 
 // -- authority -------------------------------------------------------------
@@ -423,16 +450,17 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
 
     let joined = state.with_room(&scope, |room, _store| {
         let updates = room.subscribe();
+        let presence = room.sender();
         let payload = serde_json::to_string(&ServerMessage::Init {
             actor: connection,
             doc: room.document(),
         });
-        (updates, payload)
+        (updates, presence, payload)
     });
 
     // At the room cap: refuse this connection rather than evict somebody
     // else's board.
-    let Some((mut updates, payload)) = joined else {
+    let Some((mut updates, presence, payload)) = joined else {
         let _ = outbound.send(Message::Close(None)).await;
         return;
     };
@@ -472,6 +500,7 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
 
     let receiving_state = state.clone();
     let receiving_scope = scope.clone();
+    let departure = presence.clone();
     let mut receive = tokio::spawn(async move {
         let mut limiter = RateLimiter::new();
 
@@ -492,13 +521,30 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
                 continue; // Transient burst: drop this frame, keep the session.
             }
 
-            let Ok(ClientMessage::Ops { ops }) = serde_json::from_str::<ClientMessage>(&text)
-            else {
+            let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else {
                 continue; // A malformed frame drops, it does not close the session.
             };
-            if ops.is_empty() {
-                continue;
-            }
+
+            let ops = match message {
+                ClientMessage::Ops { ops } if !ops.is_empty() => ops,
+                ClientMessage::Ops { .. } => continue,
+                // Relayed straight out: no lock, no document, no log. This is
+                // the whole reason presence is a separate message rather than
+                // an operation.
+                ClientMessage::Presence { x, y } => {
+                    if !x.is_finite() || !y.is_finite() {
+                        continue;
+                    }
+                    if let Ok(payload) = serde_json::to_string(&ServerMessage::Presence {
+                        actor: connection,
+                        x,
+                        y,
+                    }) {
+                        let _ = presence.send((connection, payload));
+                    }
+                    continue;
+                }
+            };
 
             let Ok(relayed) = serde_json::to_string(&ServerMessage::Ops { ops: &ops }) else {
                 continue;
@@ -558,5 +604,11 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
     tokio::select! {
         _ = &mut relay => receive.abort(),
         _ = &mut receive => relay.abort(),
+    }
+
+    // Announced rather than left to time out. A cursor that lingers after
+    // someone closes the tab reads as a colleague who is still there.
+    if let Ok(payload) = serde_json::to_string(&ServerMessage::Left { actor: connection }) {
+        let _ = departure.send((connection, payload));
     }
 }

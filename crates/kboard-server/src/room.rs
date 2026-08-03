@@ -90,6 +90,15 @@ impl Room {
         self.since_snapshot = 0;
     }
 
+    /// A handle for sending without holding the server lock.
+    ///
+    /// Presence uses this. Cursor movement arrives tens of times a second per
+    /// user, and routing it through the single server mutex would make every
+    /// room contend on every other room's mouse.
+    pub fn sender(&self) -> broadcast::Sender<Fanout> {
+        self.sender.clone()
+    }
+
     pub fn subscribe(&mut self) -> broadcast::Receiver<Fanout> {
         self.last_active = Instant::now();
         self.sender.subscribe()

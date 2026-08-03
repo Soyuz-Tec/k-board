@@ -22,8 +22,10 @@ pub const MAX_OPS_PER_FRAME: usize = 512;
 
 /// Sustained frames per second per connection, and the burst allowance.
 ///
-/// The client commits a drag at most every 50ms (20/s), so 60/s leaves ample
-/// headroom for a fast stylus while capping a hostile peer.
+/// Two streams share this budget. The client commits a drag at most every 50ms
+/// (20/s) and reports its cursor at most every 60ms (~17/s), so a user drawing
+/// as fast as the client will emit sends about 37/s. 60/s leaves headroom for a
+/// fast stylus while still capping a hostile peer.
 pub const RATE_PER_SECOND: f64 = 60.0;
 pub const RATE_BURST: f64 = 120.0;
 
