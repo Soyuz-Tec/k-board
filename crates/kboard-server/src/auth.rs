@@ -19,8 +19,8 @@
 //! the scope the bearer may open and when the grant expires. Self-contained, so
 //! verifying one needs no lookup and no shared state between processes.
 //!
-//! A token authorises **one scope**. A bearer for `tenant-a/board` cannot open
-//! `tenant-b/board`, which is the property that makes the scope in the URL
+//! A token authorises **one scope**. A bearer for `tenant-a:board` cannot open
+//! `tenant-b:board`, which is the property that makes the scope in the URL
 //! untrusted input rather than an authorisation decision.
 
 use std::net::IpAddr;
@@ -181,21 +181,21 @@ mod tests {
     fn a_minted_token_opens_its_own_scope() {
         let authority = Authority::with_secret("correct horse battery staple");
         let token = authority
-            .mint("tenant-a/board", DEFAULT_TTL_SECONDS)
+            .mint("tenant-a:board", DEFAULT_TTL_SECONDS)
             .unwrap();
-        assert_eq!(authority.verify(Some(&token), "tenant-a/board"), Ok(()));
+        assert_eq!(authority.verify(Some(&token), "tenant-a:board"), Ok(()));
     }
 
     #[test]
     fn a_token_does_not_open_another_scope() {
         let authority = Authority::with_secret("secret");
         let token = authority
-            .mint("tenant-a/board", DEFAULT_TTL_SECONDS)
+            .mint("tenant-a:board", DEFAULT_TTL_SECONDS)
             .unwrap();
         // This is what makes the scope in the URL untrusted input rather than
         // an authorisation decision.
         assert_eq!(
-            authority.verify(Some(&token), "tenant-b/board"),
+            authority.verify(Some(&token), "tenant-b:board"),
             Err(Denied::WrongScope)
         );
     }
@@ -204,9 +204,9 @@ mod tests {
     fn a_token_from_another_secret_is_refused() {
         let issuer = Authority::with_secret("one secret");
         let verifier = Authority::with_secret("a different secret");
-        let token = issuer.mint("t/b", DEFAULT_TTL_SECONDS).unwrap();
+        let token = issuer.mint("t:b", DEFAULT_TTL_SECONDS).unwrap();
         assert_eq!(
-            verifier.verify(Some(&token), "t/b"),
+            verifier.verify(Some(&token), "t:b"),
             Err(Denied::BadSignature)
         );
     }
@@ -214,14 +214,14 @@ mod tests {
     #[test]
     fn an_expired_token_is_refused() {
         let authority = Authority::with_secret("secret");
-        let token = authority.mint("t/b", 0).unwrap();
-        assert_eq!(authority.verify(Some(&token), "t/b"), Err(Denied::Expired));
+        let token = authority.mint("t:b", 0).unwrap();
+        assert_eq!(authority.verify(Some(&token), "t:b"), Err(Denied::Expired));
     }
 
     #[test]
     fn a_tampered_payload_is_refused_before_it_is_parsed() {
         let authority = Authority::with_secret("secret");
-        let token = authority.mint("t/b", DEFAULT_TTL_SECONDS).unwrap();
+        let token = authority.mint("t:b", DEFAULT_TTL_SECONDS).unwrap();
         let (_, signature) = token.split_once('.').unwrap();
 
         // A payload claiming a different scope, carrying the original
@@ -240,21 +240,21 @@ mod tests {
         let authority = Authority::with_secret("secret");
         for candidate in ["", ".", "no-dot", "!!!.!!!", "a.b"] {
             assert!(
-                authority.verify(Some(candidate), "t/b").is_err(),
+                authority.verify(Some(candidate), "t:b").is_err(),
                 "{candidate}"
             );
         }
-        assert_eq!(authority.verify(None, "t/b"), Err(Denied::Missing));
+        assert_eq!(authority.verify(None, "t:b"), Err(Denied::Missing));
     }
 
     #[test]
     fn an_open_authority_admits_everyone_and_mints_nothing() {
         let authority = Authority::open();
         assert!(!authority.is_enforcing());
-        assert_eq!(authority.verify(None, "t/b"), Ok(()));
+        assert_eq!(authority.verify(None, "t:b"), Ok(()));
         // Handing back a token an open server ignores would invite someone to
         // believe it protects them.
-        assert!(authority.mint("t/b", DEFAULT_TTL_SECONDS).is_none());
+        assert!(authority.mint("t:b", DEFAULT_TTL_SECONDS).is_none());
     }
 
     #[test]

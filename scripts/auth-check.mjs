@@ -24,7 +24,9 @@ import { loadEngine } from "../web/kboard.js";
 const PORT = process.env.KBOARD_AUTH_PORT ?? "8098";
 const BASE = `http://127.0.0.1:${PORT}`;
 const SECRET = "an unusually long check secret, not a real one";
-const SCOPE = "tenant-a/board";
+// Scopes are alphanumeric plus `- _ . :` — a slash is refused as path
+// traversal, so the tenant separator is a colon.
+const SCOPE = "tenant-a:board";
 const BINARY =
   process.env.KBOARD_BIN ??
   (process.platform === "win32"
@@ -110,7 +112,7 @@ function handshakeStatus(scope, token) {
     if (token !== undefined) headers["Sec-WebSocket-Protocol"] = `kboard.token.${token}`;
 
     const attempt = request(
-      { host: "127.0.0.1", port: Number(PORT), path: `/ws/${encodeURIComponent(scope)}`, headers },
+      { host: "127.0.0.1", port: Number(PORT), path: `/ws/${scope}`, headers },
       (response) => {
         response.resume();
         resolve(response.statusCode);
@@ -128,7 +130,7 @@ function handshakeStatus(scope, token) {
 /** Connect as a real client with a grant, and draw something. */
 function drawWithToken(engine, token) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${PORT}/ws/${encodeURIComponent(SCOPE)}`, [
+    const socket = new WebSocket(`ws://127.0.0.1:${PORT}/ws/${SCOPE}`, [
       `kboard.token.${token}`,
     ]);
     socket.onerror = () => reject(new Error("authorised client was refused"));
@@ -174,7 +176,7 @@ try {
   const token = minted.stdout.trim();
   check("a secret mints a grant", minted.code === 0 && token.includes("."), token.slice(0, 40));
 
-  const otherScope = (await run(["--token", "tenant-b/board"], { KBOARD_SECRET: SECRET })).stdout.trim();
+  const otherScope = (await run(["--token", "tenant-b:board"], { KBOARD_SECRET: SECRET })).stdout.trim();
   const otherSecret = (
     await run(["--token", SCOPE], { KBOARD_SECRET: "an entirely different secret" })
   ).stdout.trim();
@@ -182,20 +184,27 @@ try {
   // 3. The claims that matter, against a running server.
   server = await startServer({ KBOARD_SECRET: SECRET });
 
-  check("an unauthenticated connection is refused", (await handshakeStatus(SCOPE)) === 401);
-  check("a grant for another scope is refused", (await handshakeStatus(SCOPE, otherScope)) === 401);
-  check(
-    "a grant signed with another secret is refused",
-    (await handshakeStatus(SCOPE, otherSecret)) === 401,
-  );
-  check("a forged token is refused", (await handshakeStatus(SCOPE, "not.atoken")) === 401);
-  check("a valid grant is admitted", (await handshakeStatus(SCOPE, token)) === 101);
+  // Reported with the status, not just pass/fail: a refusal for the wrong
+  // reason — a 400 from a malformed request, say — looks identical to a
+  // refusal for the right one.
+  const refuses = async (label, presented) => {
+    const status = await handshakeStatus(SCOPE, presented);
+    check(label, status === 401, `HTTP ${status}`);
+  };
+
+  await refuses("an unauthenticated connection is refused", undefined);
+  await refuses("a grant for another scope is refused", otherScope);
+  await refuses("a grant signed with another secret is refused", otherSecret);
+  await refuses("a forged token is refused", "not.atoken");
+
+  const admitted = await handshakeStatus(SCOPE, token);
+  check("a valid grant is admitted", admitted === 101, `HTTP ${admitted}`);
 
   // 4. Admitted is not the same as usable — the negotiated subprotocol has to
   //    be echoed back or the browser closes the connection it just opened.
   const engine = await loadEngine(`${BASE}/kboard.wasm`);
   await drawWithToken(engine, token);
-  const stats = await (await fetch(`${BASE}/api/rooms/${encodeURIComponent(SCOPE)}/stats`)).json();
+  const stats = await (await fetch(`${BASE}/api/rooms/${SCOPE}/stats`)).json();
   check("an authorised client can actually draw", stats.elements === 1, JSON.stringify(stats));
 } catch (error) {
   failures += 1;
