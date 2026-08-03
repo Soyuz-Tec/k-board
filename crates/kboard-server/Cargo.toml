@@ -14,5 +14,12 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures-util = "0.3"
+# HMAC primitives rather than a JWT library: the token format is forty lines and
+# fully specified here, where a library would bring algorithm negotiation and
+# the `alg: none` family of mistakes that come with it.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }

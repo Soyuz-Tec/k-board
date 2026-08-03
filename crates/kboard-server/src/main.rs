@@ -12,16 +12,20 @@
 //!
 //! ## Posture
 //!
-//! Resource limits are enforced (see [`limits`]) so an unauthenticated peer
-//! cannot exhaust the process. **Authentication is still absent** —
-//! [`authorize`] admits everyone. Until that changes this is safe to run on a
-//! trusted network and nowhere else.
+//! Resource limits are enforced (see [`limits`]) so a peer cannot exhaust the
+//! process, and connections are authenticated when a secret is configured (see
+//! [`auth`]).
+//!
+//! Without a secret the server admits everyone — and refuses to bind anything
+//! but loopback, so that configuration is a development convenience rather than
+//! an unauthenticated writable store on a network.
 
+mod auth;
 mod limits;
 mod room;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +33,7 @@ use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -44,6 +48,7 @@ use kboard_core::op::StampedOp;
 use kboard_core::ports::{OpLog, SnapshotStore};
 use kboard_store::SqliteStore;
 
+use crate::auth::Authority;
 use crate::limits::RateLimiter;
 use crate::room::{Refused, Room};
 
@@ -65,6 +70,7 @@ struct AppState {
     state: Arc<Mutex<ServerState>>,
     next_connection: Arc<AtomicU64>,
     wasm_path: PathBuf,
+    authority: Arc<Authority>,
 }
 
 impl AppState {
@@ -148,17 +154,20 @@ enum ClientMessage {
 
 // -- authority -------------------------------------------------------------
 
-/// The standalone deployment's authority decision.
-///
-/// This is the seam. A real deployment authenticates here; K-Comms replaces
-/// this entire binary with its own membership check and never reaches this
-/// function. The engine itself has no opinion either way — which is what lets
-/// both arrangements exist.
-///
-/// It currently admits everyone. That is the single reason this server is not
-/// production-ready, and it is deliberately one function so it stays obvious.
-fn authorize(_scope: &str) -> bool {
-    true
+/// Browsers cannot set headers on a WebSocket handshake, so the token travels
+/// as a subprotocol rather than a query parameter. A URL ends up in server
+/// logs, browser history, and referrers; a subprotocol does not.
+const TOKEN_PROTOCOL_PREFIX: &str = "kboard.token.";
+
+/// Extracts the bearer token a client offered, if any.
+fn offered_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .find_map(|protocol| protocol.strip_prefix(TOKEN_PROTOCOL_PREFIX))
 }
 
 #[tokio::main]
@@ -173,6 +182,28 @@ async fn main() {
         std::env::var("KBOARD_WASM")
             .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/kboard.wasm".to_owned()),
     );
+
+    let authority = Authority::from_env();
+
+    // `--token <scope>` mints a grant and exits, so issuing one needs no
+    // separate tool and no second copy of the token format.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(scope) = arguments
+        .iter()
+        .position(|argument| argument == "--token")
+        .and_then(|index| arguments.get(index + 1))
+    {
+        match authority.mint(scope, auth::DEFAULT_TTL_SECONDS) {
+            Some(token) => {
+                println!("{token}");
+                return;
+            }
+            None => {
+                eprintln!("k-board: set KBOARD_SECRET before minting a token");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Durability is always on; whether it survives the process depends on
     // whether a path was given. One code path either way, so the in-memory
@@ -196,6 +227,7 @@ async fn main() {
         })),
         next_connection: Arc::new(AtomicU64::new(0)),
         wasm_path,
+        authority: Arc::new(authority),
     };
 
     spawn_room_sweeper(state.clone());
@@ -212,7 +244,24 @@ async fn main() {
         .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let bind: IpAddr = std::env::var("KBOARD_BIND")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+    // The refusal is here rather than at every request: an open server on
+    // loopback is a development convenience, while an open server on any other
+    // interface is an unauthenticated writable store on a network. That is not
+    // a configuration to warn about.
+    if !state.authority.permits_bind(bind) {
+        eprintln!(
+            "k-board: refusing to bind {bind} without authentication. \
+             Set KBOARD_SECRET, or bind loopback."
+        );
+        std::process::exit(1);
+    }
+
+    let address = SocketAddr::new(bind, port);
     let listener = match tokio::net::TcpListener::bind(address).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -227,7 +276,11 @@ async fn main() {
         Some(path) => println!("  storing boards in {path}"),
         None => println!("  WARNING: in-memory store — boards are lost on restart (set KBOARD_DB)"),
     }
-    println!("  WARNING: no authentication — trusted networks only");
+    if state.authority.is_enforcing() {
+        println!("  authentication required; mint a grant with --token <scope>");
+    } else {
+        println!("  WARNING: no authentication — loopback only (set KBOARD_SECRET)");
+    }
 
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
@@ -331,19 +384,33 @@ async fn room_stats(Path(scope): Path<String>, State(state): State<AppState>) ->
 async fn websocket(
     upgrade: WebSocketUpgrade,
     Path(scope): Path<String>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
     if !limits::scope_is_acceptable(&scope) {
         return (StatusCode::BAD_REQUEST, "invalid scope").into_response();
     }
-    if !authorize(&scope) {
-        return (StatusCode::FORBIDDEN, "not permitted").into_response();
+
+    let token = offered_token(&headers);
+    if let Err(reason) = state.authority.verify(token, &scope) {
+        // Logged, never returned. A client that learns *why* its token failed
+        // learns something about the secret.
+        eprintln!("k-board: refused {scope}: {reason:?}");
+        return (StatusCode::UNAUTHORIZED, "not permitted").into_response();
     }
+
+    // A selected subprotocol has to be echoed back or the browser closes the
+    // connection as unnegotiated.
+    let selected = token.map(|token| format!("{TOKEN_PROTOCOL_PREFIX}{token}"));
+
     // Enforced at the protocol layer as well as in the read loop, so an
     // oversized frame is rejected before it is ever fully buffered.
-    upgrade
-        .max_message_size(limits::MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| session(socket, scope, state))
+    let upgrade = upgrade.max_message_size(limits::MAX_FRAME_BYTES);
+    let upgrade = match selected {
+        Some(protocol) => upgrade.protocols([protocol]),
+        None => upgrade,
+    };
+    upgrade.on_upgrade(move |socket| session(socket, scope, state))
 }
 
 async fn session(socket: WebSocket, scope: String, state: AppState) {
