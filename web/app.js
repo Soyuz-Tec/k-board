@@ -15,6 +15,8 @@ const statusDot = document.getElementById("dot");
 const statusText = document.getElementById("statusText");
 const hint = document.getElementById("hint");
 const a11yList = document.getElementById("a11yList");
+const undoButton = document.getElementById("undo");
+const redoButton = document.getElementById("redo");
 
 const COMMIT_INTERVAL_MS = 50; // live-drag update rate sent to peers
 
@@ -124,7 +126,27 @@ function invalidate() {
 function sceneChanged() {
   if (state.board !== null) state.scene = state.engine.scene(state.board);
   describeForScreenReaders();
+  refreshHistoryControls();
   state.dirty = true;
+}
+
+// Reads the engine rather than tracking it here, so the buttons can never
+// disagree with what undo would actually do.
+function refreshHistoryControls() {
+  if (state.board === null) return;
+  const { canUndo, canRedo } = state.engine.history(state.board);
+  undoButton.disabled = !canUndo;
+  redoButton.disabled = !canRedo;
+}
+
+function stepHistory(backward) {
+  if (state.board === null) return;
+  const moved = backward
+    ? state.engine.undo(state.board)
+    : state.engine.redo(state.board);
+  if (!moved) return;
+  flush();
+  sceneChanged();
 }
 
 function drawShape(item) {
@@ -527,6 +549,9 @@ for (const swatch of document.querySelectorAll(".swatch")) {
   });
 }
 
+undoButton.addEventListener("click", () => stepHistory(true));
+redoButton.addEventListener("click", () => stepHistory(false));
+
 document.getElementById("clear").addEventListener("click", () => {
   if (state.board === null) return;
   state.engine.exec(state.board, { cmd: "clear" });
@@ -545,6 +570,21 @@ const SHORTCUTS = {
 };
 
 window.addEventListener("keydown", (event) => {
+  // Undo shortcuts are the one place a modifier is expected, so they are
+  // handled before the plain tool shortcuts bail out on one.
+  if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+    const key = event.key.toLowerCase();
+    if (key === "z") {
+      event.preventDefault();
+      stepHistory(!event.shiftKey);
+      return;
+    }
+    if (key === "y") {
+      event.preventDefault();
+      stepHistory(false);
+      return;
+    }
+  }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   const tool = SHORTCUTS[event.key.toLowerCase()];
   if (tool) selectTool(tool);

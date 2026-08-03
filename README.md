@@ -152,7 +152,8 @@ pixels to be painting for content to be readable.
 - Authority ports; tenant scope isolation
 - C ABI with panic trapping; wasm32 and native from one crate
 - WebSocket sync server with per-room compacting log
-- Browser client: shapes, freehand, select/move, erase, pan, zoom, colours
+- Browser client: shapes, freehand, select/move, erase, pan, zoom, colours,
+  undo/redo with Ctrl+Z / Ctrl+Shift+Z
 - Local-first queueing — draw offline, reconnect, replay
 - DOM accessibility mirror
 - Server hardening: rate limiting, frame/batch caps, room bounds, idle
@@ -163,11 +164,12 @@ pixels to be painting for content to be readable.
 - Dependency policy via `cargo-deny` — licences, duplicates, and sources
 - Durable persistence: SQLite behind the engine's `OpLog`/`SnapshotStore`
   ports, with boards restored on join ([ADR-0007](docs/adr/0007-sqlite-durable-storage.md))
+- Undo/redo, per actor, as fresh writes of prior values — so a reversal
+  converges like any other edit and reaches collaborators
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
-- Undo/redo (cheap here: rewrite the prior value with a fresh stamp)
 - Authentication in the standalone server
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Headless renderer (`lyon` → `resvg`) for server-side SVG/PNG

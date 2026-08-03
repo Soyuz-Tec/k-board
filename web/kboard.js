@@ -18,7 +18,7 @@ export const STATUS = Object.freeze({
   REFUSED: 4,
 });
 
-const EXPECTED_ABI = 1;
+const EXPECTED_ABI = 2;
 
 export class EngineError extends Error {
   constructor(operation, status) {
@@ -133,6 +133,37 @@ export class Engine {
     if (status !== STATUS.OK) throw new EngineError("pending", status);
     const json = this.#result();
     return json ? JSON.parse(json) : [];
+  }
+
+  /**
+   * Reverse this actor's most recent change. Returns whether anything moved.
+   *
+   * The reversal is an ordinary edit and shows up in `pending()` like any
+   * other, so the caller broadcasts it without special handling.
+   */
+  undo(handle, nowMs = Date.now()) {
+    const status = this.#exports.kb_undo(handle, nowMs);
+    if (status !== STATUS.OK) throw new EngineError("undo", status);
+    return this.#result() === "true";
+  }
+
+  /** Reapply the most recently undone change. */
+  redo(handle, nowMs = Date.now()) {
+    const status = this.#exports.kb_redo(handle, nowMs);
+    if (status !== STATUS.OK) throw new EngineError("redo", status);
+    return this.#result() === "true";
+  }
+
+  /**
+   * What the history currently allows.
+   *
+   * One call rather than two so a toolbar cannot render half-updated.
+   */
+  history(handle) {
+    const status = this.#exports.kb_history(handle);
+    if (status !== STATUS.OK) throw new EngineError("history", status);
+    const [canUndo, canRedo] = this.#result().split(",");
+    return { canUndo: canUndo === "true", canRedo: canRedo === "true" };
   }
 
   /** Render-ready scene, in paint order. */

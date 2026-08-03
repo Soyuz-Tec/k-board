@@ -54,6 +54,13 @@ function connect(name) {
         return id;
       },
       scene: () => engine.scene(board),
+      undo() {
+        const moved = engine.undo(board);
+        const ops = engine.pending(board);
+        if (ops.length > 0) socket.send(JSON.stringify({ type: "ops", ops }));
+        return moved;
+      },
+      history: () => engine.history(board),
       close: () => socket.close(),
     };
 
@@ -119,6 +126,7 @@ check(
 
 // 3. A late joiner receives the current state, not the history.
 const carol = await connect("carol");
+const carolCanUndo = () => carol.history().canUndo;
 await wait(SETTLE_MS);
 check("late joiner receives current state", carol.scene().length === 1);
 check(
@@ -126,7 +134,27 @@ check(
   JSON.stringify(carol.scene()[0]) === JSON.stringify(fromAlice),
 );
 
-// 4. Deletion converges too.
+// 4. An undo is an ordinary edit: it reaches peers and converges.
+alice.exec({ cmd: "move", id, x: 400, y: 400 });
+await wait(SETTLE_MS);
+check("a move reaches the peer", bob.scene()[0]?.x === 400, `x=${bob.scene()[0]?.x}`);
+
+check("the mover can undo", alice.history().canUndo);
+check("the peer cannot undo work it did not do", !carolCanUndo(), "history is per actor");
+
+alice.undo();
+await wait(SETTLE_MS);
+check(
+  "the undo reached the peer",
+  bob.scene()[0]?.x === 250,
+  `x=${bob.scene()[0]?.x}`,
+);
+check(
+  "replicas still agree after an undo",
+  JSON.stringify(alice.scene()) === JSON.stringify(bob.scene()),
+);
+
+// 5. Deletion converges too.
 bob.exec({ cmd: "delete", id });
 await wait(SETTLE_MS);
 check(
