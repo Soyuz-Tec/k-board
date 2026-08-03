@@ -153,6 +153,11 @@ jobs:
       - name: Presence
         run: node scripts/presence-check.mjs
 
+      # Scaling a stroke without its path, or stretching a label on one axis,
+      # both look fine on a rectangle and fall apart on everything else.
+      - name: Transform
+        run: node scripts/transform-check.mjs
+
       # A copy that kept its element id would rewrite the original instead of
       # adding a shape — a "paste" that silently moves what you copied.
       - name: Clipboard

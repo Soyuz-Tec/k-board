@@ -92,6 +92,7 @@ export function bounds(item) {
  *
  * Stroke width is included: a line drawn exactly on the boundary is half
  * outside the geometric box, and an export cropped to the geometry clips it.
+ * So is rotation, for the same reason.
  */
 export function sceneBounds(scene) {
   if (scene.length === 0) return null;
@@ -100,14 +101,68 @@ export function sceneBounds(scene) {
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const item of scene) {
-    const box = bounds(item);
     const bleed = (item.stroke_width || 2) / 2;
-    minX = Math.min(minX, box.x - bleed);
-    minY = Math.min(minY, box.y - bleed);
-    maxX = Math.max(maxX, box.x + box.w + bleed);
-    maxY = Math.max(maxY, box.y + box.h + bleed);
+    // Corners rather than the box: a rotated shape reaches past its own
+    // axis-aligned extents, and an export cropped to those clips its edges off.
+    for (const [x, y] of corners(item)) {
+      minX = Math.min(minX, x - bleed);
+      minY = Math.min(minY, y - bleed);
+      maxX = Math.max(maxX, x + bleed);
+      maxY = Math.max(maxY, y + bleed);
+    }
   }
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * The rotation an element carries, or null when it is upright.
+ *
+ * Kept as a transform rather than baked into the figures: rotated glyphs cannot
+ * be expressed as rotated coordinates, so a description that pre-rotated its
+ * points would have nothing to say about text. One transform covers every kind.
+ */
+export function rotation(item) {
+  const angle = item.angle || 0;
+  if (angle === 0) return null;
+  const box = bounds(item);
+  return { angle, cx: box.x + box.w / 2, cy: box.y + box.h / 2 };
+}
+
+/**
+ * Move a point into an element's own frame.
+ *
+ * Hit-testing happens in board coordinates, but a rotated element's box is not
+ * axis-aligned there. Rotating the *pointer* backwards is cheaper and simpler
+ * than rotating the box forwards, and gives the same answer.
+ */
+export function intoLocal(item, x, y) {
+  const spin = rotation(item);
+  if (!spin) return [x, y];
+  const cos = Math.cos(-spin.angle);
+  const sin = Math.sin(-spin.angle);
+  const dx = x - spin.cx;
+  const dy = y - spin.cy;
+  return [spin.cx + dx * cos - dy * sin, spin.cy + dx * sin + dy * cos];
+}
+
+/** The four corners of an element's box, in board coordinates. */
+export function corners(item) {
+  const box = bounds(item);
+  const spin = rotation(item);
+  const points = [
+    [box.x, box.y],
+    [box.x + box.w, box.y],
+    [box.x + box.w, box.y + box.h],
+    [box.x, box.y + box.h],
+  ];
+  if (!spin) return points;
+  const cos = Math.cos(spin.angle);
+  const sin = Math.sin(spin.angle);
+  return points.map(([x, y]) => {
+    const dx = x - spin.cx;
+    const dy = y - spin.cy;
+    return [spin.cx + dx * cos - dy * sin, spin.cy + dx * sin + dy * cos];
+  });
 }
 
 /**
@@ -245,6 +300,14 @@ export function geometry(item) {
 export function drawShape(context, item) {
   const { fillable, figures } = geometry(item);
   const filled = fillable && (item.fill & 255) !== 0;
+  const spin = rotation(item);
+
+  if (spin) {
+    context.save();
+    context.translate(spin.cx, spin.cy);
+    context.rotate(spin.angle);
+    context.translate(-spin.cx, -spin.cy);
+  }
 
   context.strokeStyle = unpack(item.stroke);
   context.lineWidth = item.stroke_width || 2;
@@ -277,6 +340,8 @@ export function drawShape(context, item) {
     if (filled) context.fill();
     context.stroke();
   }
+
+  if (spin) context.restore();
 }
 
 // -- SVG back-end ----------------------------------------------------------
@@ -309,7 +374,7 @@ function elementMarkup(item) {
     `fill="${filled ? unpack(item.fill) : "none"}" stroke="${unpack(item.stroke)}" ` +
     `stroke-width="${n(item.stroke_width || 2)}" stroke-linejoin="round" stroke-linecap="round"`;
 
-  return figures.map((figure) => {
+  const markup = figures.map((figure) => {
     if (figure.text) {
       const { rows, size } = figure.text;
       const spans = rows
@@ -331,6 +396,16 @@ function elementMarkup(item) {
     }
     return `<path d="${pathData(figure)}" ${paint}/>`;
   });
+
+  const spin = rotation(item);
+  if (!spin) return markup;
+  // Degrees, because that is what SVG takes — the only place in the codebase
+  // where the angle is not in radians, and the conversion is here so it is the
+  // only place that has to know.
+  const degrees = n((spin.angle * 180) / Math.PI);
+  return [
+    `<g transform="rotate(${degrees} ${n(spin.cx)} ${n(spin.cy)})">${markup.join("")}</g>`,
+  ];
 }
 
 /**
