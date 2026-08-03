@@ -51,7 +51,7 @@ pub const STATUS_REFUSED: u32 = 4;
 
 /// ABI version. Hosts should check this on load — the wasm and native artifacts
 /// must always come from the same build.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 #[derive(Default)]
 struct Registry {
@@ -296,6 +296,60 @@ pub unsafe extern "C" fn kb_load(handle: u32, ptr: *const u8, len: usize) -> u32
                 }
                 Err(_) => STATUS_REFUSED,
             }
+        })
+    })
+}
+
+/// Reverse this actor's most recent change.
+///
+/// Publishes `"true"` when something was undone, `"false"` when the history is
+/// empty. The reversal is an ordinary edit and appears in `kb_pending` like any
+/// other, so a host broadcasts it without special handling.
+#[no_mangle]
+pub extern "C" fn kb_undo(handle: u32, now_ms: f64) -> u32 {
+    step(handle, now_ms, true)
+}
+
+/// Reapply the most recently undone change.
+#[no_mangle]
+pub extern "C" fn kb_redo(handle: u32, now_ms: f64) -> u32 {
+    step(handle, now_ms, false)
+}
+
+/// Publish whether undo and redo are currently available, as `"<undo>,<redo>"`.
+/// One call rather than two so a host cannot render a half-updated toolbar.
+#[no_mangle]
+pub extern "C" fn kb_history(handle: u32) -> u32 {
+    guarded(|| {
+        with_registry(|registry| {
+            let Some(board) = registry.boards.get(&handle) else {
+                return STATUS_NO_BOARD;
+            };
+            publish(format!("{},{}", board.can_undo(), board.can_redo()).into_bytes());
+            STATUS_OK
+        })
+    })
+}
+
+fn step(handle: u32, now_ms: f64, backward: bool) -> u32 {
+    let now = if now_ms.is_finite() && now_ms > 0.0 {
+        now_ms as u64
+    } else {
+        0
+    };
+
+    guarded(|| {
+        with_registry(|registry| {
+            let Some(board) = registry.boards.get_mut(&handle) else {
+                return STATUS_NO_BOARD;
+            };
+            let moved = if backward {
+                board.undo(now)
+            } else {
+                board.redo(now)
+            };
+            publish(moved.to_string().into_bytes());
+            STATUS_OK
         })
     })
 }

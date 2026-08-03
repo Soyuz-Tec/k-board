@@ -104,6 +104,31 @@ impl std::fmt::Display for BoardError {
 // `?` chain like any other error type.
 impl std::error::Error for BoardError {}
 
+/// One step of a reversal, stored without a stamp.
+///
+/// Undo is a *new* write of a prior value (ADR-0001), not a retraction of the
+/// original one. It therefore needs a fresh stamp at the moment it is applied,
+/// which is why nothing here carries the stamp the original edit had.
+#[derive(Clone, Debug)]
+enum Reversal {
+    Set(ElementId, PropKey, PropValue),
+    Delete(ElementId),
+}
+
+/// One reversible step: how to undo it, and how to put it back.
+#[derive(Clone, Debug)]
+struct Change {
+    backward: Vec<Reversal>,
+    forward: Vec<Reversal>,
+}
+
+/// How many steps a single actor may walk back.
+///
+/// Bounded because the stack holds prior property values, so an unbounded one
+/// grows with editing rather than with board size — and ADR-0007 keeps it in
+/// memory, where growth has nowhere to go.
+const MAX_HISTORY: usize = 200;
+
 /// A live board: the document, this replica's clock, and the operations that
 /// have not yet been broadcast.
 pub struct Board {
@@ -114,6 +139,12 @@ pub struct Board {
     /// a random source. The engine stays deterministic and the host does not
     /// have to supply entropy across the FFI boundary.
     next_local: u64,
+    /// This actor's own history. Never persisted (ADR-0007) and never
+    /// populated by remote operations: undoing a collaborator's edit is not
+    /// undo, it is editing their work, and it should take the same deliberate
+    /// action as any other change.
+    undone: Vec<Change>,
+    redone: Vec<Change>,
 }
 
 impl Board {
@@ -123,6 +154,8 @@ impl Board {
             clock: HlcGenerator::new(ActorId(actor)),
             pending: Vec::new(),
             next_local: 0,
+            undone: Vec::new(),
+            redone: Vec::new(),
         }
     }
 
@@ -138,6 +171,97 @@ impl Board {
     fn record(&mut self, ops: Vec<StampedOp>) {
         op::apply_all(&mut self.document, &ops);
         self.pending.extend(ops);
+    }
+
+    /// Apply a local command and remember how to reverse it.
+    ///
+    /// New work discards the redo stack. Keeping it would let a user redo
+    /// their way to a state that never existed — the redone edit would land on
+    /// top of work done after it was undone.
+    fn record_change(&mut self, ops: Vec<StampedOp>, change: Change) {
+        self.record(ops);
+        self.redone.clear();
+        self.undone.push(change);
+        if self.undone.len() > MAX_HISTORY {
+            self.undone.remove(0);
+        }
+    }
+
+    /// The current values of `keys`, for restoring later.
+    ///
+    /// A key with no current value is omitted rather than recorded as absent:
+    /// the engine has no way to un-write a property, and every command that
+    /// creates properties from nothing is reversed by deleting the element, so
+    /// the stray values are never visible.
+    fn capture(&self, element: ElementId, keys: &[PropKey]) -> Vec<Reversal> {
+        let Some(current) = self.document.get(element) else {
+            return Vec::new();
+        };
+        keys.iter()
+            .filter_map(|key| {
+                current
+                    .get(key)
+                    .map(|value| Reversal::Set(element, key.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    fn stamp(&mut self, reversals: &[Reversal], now_ms: u64) -> Vec<StampedOp> {
+        reversals
+            .iter()
+            .map(|reversal| {
+                let stamp = self.clock.tick(now_ms);
+                match reversal {
+                    Reversal::Set(element, key, value) => StampedOp::new(
+                        stamp,
+                        Op::Set {
+                            element: *element,
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                    ),
+                    Reversal::Delete(element) => {
+                        StampedOp::new(stamp, Op::Delete { element: *element })
+                    }
+                }
+            })
+            .collect()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undone.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redone.is_empty()
+    }
+
+    /// Reverse this actor's most recent change.
+    ///
+    /// The reversal is an ordinary edit carrying a fresh, higher stamp, so it
+    /// converges like any other and wins over a concurrent change to the same
+    /// property. That is deliberate: undo means "make it what it was", and a
+    /// user who presses it expects the board to show what they remember, not
+    /// to negotiate with a collaborator's later edit.
+    pub fn undo(&mut self, now_ms: u64) -> bool {
+        let Some(change) = self.undone.pop() else {
+            return false;
+        };
+        let ops = self.stamp(&change.backward, now_ms);
+        self.record(ops);
+        self.redone.push(change);
+        true
+    }
+
+    /// Reapply the most recently undone change.
+    pub fn redo(&mut self, now_ms: u64) -> bool {
+        let Some(change) = self.redone.pop() else {
+            return false;
+        };
+        let ops = self.stamp(&change.forward, now_ms);
+        self.record(ops);
+        self.undone.push(change);
+        true
     }
 
     /// Execute a host command. Returns the affected element id, if any.
@@ -156,23 +280,19 @@ impl Board {
                 let element_kind = parse_kind(kind)?;
                 let id = self.mint_id();
                 let z = self.document.z_index_for_top();
-                let ops = op::upsert(
-                    id,
-                    [
-                        (PropKey::Kind, PropValue::Kind(element_kind)),
-                        (PropKey::X, PropValue::Num(*x)),
-                        (PropKey::Y, PropValue::Num(*y)),
-                        (PropKey::Width, PropValue::Num(*w)),
-                        (PropKey::Height, PropValue::Num(*h)),
-                        (PropKey::Stroke, PropValue::Color(*stroke)),
-                        (PropKey::Fill, PropValue::Color(*fill)),
-                        (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
-                        (PropKey::ZIndex, PropValue::Text(z)),
-                    ],
-                    &mut self.clock,
-                    now_ms,
-                );
-                self.record(ops);
+                let props = vec![
+                    (PropKey::Kind, PropValue::Kind(element_kind)),
+                    (PropKey::X, PropValue::Num(*x)),
+                    (PropKey::Y, PropValue::Num(*y)),
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                    (PropKey::Stroke, PropValue::Color(*stroke)),
+                    (PropKey::Fill, PropValue::Color(*fill)),
+                    (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
+                    (PropKey::ZIndex, PropValue::Text(z)),
+                ];
+                let ops = op::upsert(id, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, creation(id, props));
                 Ok(Some(id.to_hex()))
             }
 
@@ -192,51 +312,41 @@ impl Board {
                 let (min_x, min_y) = path.iter().fold((f64::MAX, f64::MAX), |(mx, my), p| {
                     (mx.min(p.x), my.min(p.y))
                 });
-                let ops = op::upsert(
-                    id,
-                    [
-                        (PropKey::Kind, PropValue::Kind(ElementKind::Freedraw)),
-                        (PropKey::X, PropValue::Num(min_x)),
-                        (PropKey::Y, PropValue::Num(min_y)),
-                        (PropKey::Points, PropValue::Points(path)),
-                        (PropKey::Stroke, PropValue::Color(*stroke)),
-                        (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
-                        (PropKey::ZIndex, PropValue::Text(z)),
-                    ],
-                    &mut self.clock,
-                    now_ms,
-                );
-                self.record(ops);
+                let props = vec![
+                    (PropKey::Kind, PropValue::Kind(ElementKind::Freedraw)),
+                    (PropKey::X, PropValue::Num(min_x)),
+                    (PropKey::Y, PropValue::Num(min_y)),
+                    (PropKey::Points, PropValue::Points(path)),
+                    (PropKey::Stroke, PropValue::Color(*stroke)),
+                    (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
+                    (PropKey::ZIndex, PropValue::Text(z)),
+                ];
+                let ops = op::upsert(id, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, creation(id, props));
                 Ok(Some(id.to_hex()))
             }
 
             Command::Move { id, x, y } => {
                 let element = self.require(id)?;
-                let ops = op::upsert(
-                    element,
-                    [
-                        (PropKey::X, PropValue::Num(*x)),
-                        (PropKey::Y, PropValue::Num(*y)),
-                    ],
-                    &mut self.clock,
-                    now_ms,
-                );
-                self.record(ops);
+                let props = vec![
+                    (PropKey::X, PropValue::Num(*x)),
+                    (PropKey::Y, PropValue::Num(*y)),
+                ];
+                let backward = self.capture(element, &[PropKey::X, PropKey::Y]);
+                let ops = op::upsert(element, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, mutation(element, backward, props));
                 Ok(Some(id.clone()))
             }
 
             Command::Resize { id, w, h } => {
                 let element = self.require(id)?;
-                let ops = op::upsert(
-                    element,
-                    [
-                        (PropKey::Width, PropValue::Num(*w)),
-                        (PropKey::Height, PropValue::Num(*h)),
-                    ],
-                    &mut self.clock,
-                    now_ms,
-                );
-                self.record(ops);
+                let props = vec![
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                ];
+                let backward = self.capture(element, &[PropKey::Width, PropKey::Height]);
+                let ops = op::upsert(element, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, mutation(element, backward, props));
                 Ok(Some(id.clone()))
             }
 
@@ -249,22 +359,45 @@ impl Board {
                 if let Some(colour) = fill {
                     props.push((PropKey::Fill, PropValue::Color(*colour)));
                 }
-                let ops = op::upsert(element, props, &mut self.clock, now_ms);
-                self.record(ops);
+                let keys: Vec<PropKey> = props.iter().map(|(key, _)| key.clone()).collect();
+                let backward = self.capture(element, &keys);
+                let ops = op::upsert(element, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, mutation(element, backward, props));
                 Ok(Some(id.clone()))
             }
 
             Command::Delete { id } => {
                 let element = self.require(id)?;
                 let stamp = self.clock.tick(now_ms);
-                self.record(vec![StampedOp::new(stamp, Op::Delete { element })]);
+                let change = Change {
+                    // Un-deleting restores the element whole: the engine keeps a
+                    // tombstone rather than removing it, so every property is
+                    // still there waiting.
+                    backward: vec![Reversal::Set(
+                        element,
+                        PropKey::Deleted,
+                        PropValue::Bool(false),
+                    )],
+                    forward: vec![Reversal::Delete(element)],
+                };
+                self.record_change(vec![StampedOp::new(stamp, Op::Delete { element })], change);
                 Ok(Some(id.clone()))
             }
 
             Command::Clear => {
                 // Expanded to explicit deletes at this replica; see op::clear.
                 let ops = op::clear(&self.document, &mut self.clock, now_ms);
-                self.record(ops);
+                let cleared: Vec<ElementId> = ops.iter().map(StampedOp::element).collect();
+                let change = Change {
+                    backward: cleared
+                        .iter()
+                        .map(|element| {
+                            Reversal::Set(*element, PropKey::Deleted, PropValue::Bool(false))
+                        })
+                        .collect(),
+                    forward: cleared.iter().copied().map(Reversal::Delete).collect(),
+                };
+                self.record_change(ops, change);
                 Ok(None)
             }
         }
@@ -346,6 +479,39 @@ impl Board {
             .last()
             .map(|e| e.z_index().to_owned());
         frac::between(highest.as_deref().filter(|k| !k.is_empty()), None)
+    }
+}
+
+/// Reversing a creation means deleting the element; reapplying it means
+/// writing the properties back and lifting the tombstone.
+fn creation(element: ElementId, props: Vec<(PropKey, PropValue)>) -> Change {
+    let mut forward: Vec<Reversal> = props
+        .into_iter()
+        .map(|(key, value)| Reversal::Set(element, key, value))
+        .collect();
+    forward.push(Reversal::Set(
+        element,
+        PropKey::Deleted,
+        PropValue::Bool(false),
+    ));
+    Change {
+        backward: vec![Reversal::Delete(element)],
+        forward,
+    }
+}
+
+/// Reversing a property change means writing back what was there.
+fn mutation(
+    element: ElementId,
+    backward: Vec<Reversal>,
+    props: Vec<(PropKey, PropValue)>,
+) -> Change {
+    Change {
+        backward,
+        forward: props
+            .into_iter()
+            .map(|(key, value)| Reversal::Set(element, key, value))
+            .collect(),
     }
 }
 
@@ -512,5 +678,135 @@ mod tests {
         assert_eq!(item.kind, "freedraw");
         assert_eq!(item.points.as_ref().unwrap().len(), 3);
         assert_eq!(item.x, 0.0, "bounding origin tracks the path minimum");
+    }
+
+    #[test]
+    fn undo_removes_a_created_shape_and_redo_brings_it_back() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 5.0);
+
+        assert!(board.can_undo() && !board.can_redo());
+        assert!(board.undo(2_000));
+        assert!(board.scene().is_empty(), "the shape is gone");
+
+        assert!(board.can_redo());
+        assert!(board.redo(3_000));
+        assert_eq!(board.scene().len(), 1);
+        assert_eq!(board.scene()[0].id, id, "the same element returns");
+    }
+
+    #[test]
+    fn undo_restores_the_previous_value_rather_than_erasing_the_property() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 5.0);
+        board
+            .exec(
+                &Command::Move {
+                    id: id.clone(),
+                    x: 250.0,
+                    y: 40.0,
+                },
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(board.scene()[0].x, 250.0);
+
+        board.undo(3_000);
+        assert_eq!(board.scene()[0].x, 5.0, "back to where it was");
+        board.redo(4_000);
+        assert_eq!(board.scene()[0].x, 250.0);
+    }
+
+    #[test]
+    fn undoing_a_delete_restores_the_whole_element() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 7.0);
+        board
+            .exec(&Command::Delete { id: id.clone() }, 2_000)
+            .unwrap();
+        assert!(board.scene().is_empty());
+
+        board.undo(3_000);
+        let restored = &board.scene()[0];
+        // The engine tombstones rather than removes, so every property is
+        // still there and lifting the flag brings the shape back intact.
+        assert_eq!(restored.id, id);
+        assert_eq!(restored.x, 7.0);
+        assert_eq!(restored.kind, "rectangle");
+    }
+
+    #[test]
+    fn undoing_a_clear_restores_every_element_it_removed() {
+        let mut board = Board::open("t/b", 1);
+        add_rect(&mut board, 1.0);
+        add_rect(&mut board, 2.0);
+        board.exec(&Command::Clear, 2_000).unwrap();
+        assert!(board.scene().is_empty());
+
+        board.undo(3_000);
+        assert_eq!(board.scene().len(), 2, "a clear is one step, not two");
+    }
+
+    #[test]
+    fn new_work_discards_the_redo_stack() {
+        let mut board = Board::open("t/b", 1);
+        add_rect(&mut board, 1.0);
+        board.undo(2_000);
+        assert!(board.can_redo());
+
+        add_rect(&mut board, 9.0);
+        // Redoing now would land the old edit on top of work done after it was
+        // undone, producing a state that never existed.
+        assert!(!board.can_redo());
+    }
+
+    #[test]
+    fn undo_is_an_ordinary_operation_that_peers_receive() {
+        let mut alice = Board::open("t/b", 1);
+        let mut bob = Board::open("t/b", 2);
+
+        add_rect(&mut alice, 5.0);
+        bob.merge_ops(&alice.take_pending());
+        assert_eq!(bob.scene().len(), 1);
+
+        alice.undo(2_000);
+        let reversal = alice.take_pending();
+        assert!(!reversal.is_empty(), "undo must be broadcast like any edit");
+
+        bob.merge_ops(&reversal);
+        assert!(bob.scene().is_empty(), "the peer sees the undo");
+        assert_eq!(alice.document(), bob.document());
+    }
+
+    #[test]
+    fn undo_does_nothing_on_an_empty_history() {
+        let mut board = Board::open("t/b", 1);
+        assert!(!board.undo(1_000));
+        assert!(!board.redo(1_000));
+        assert!(!board.can_undo() && !board.can_redo());
+    }
+
+    #[test]
+    fn a_remote_operation_never_enters_local_history() {
+        let mut alice = Board::open("t/b", 1);
+        let mut bob = Board::open("t/b", 2);
+        add_rect(&mut alice, 5.0);
+
+        bob.merge_ops(&alice.take_pending());
+        // Undoing a collaborator's edit is editing their work, not undo.
+        assert!(!bob.can_undo());
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut board = Board::open("t/b", 1);
+        for step in 0..(MAX_HISTORY + 20) {
+            add_rect(&mut board, step as f64);
+        }
+        assert_eq!(
+            board.undone.len(),
+            MAX_HISTORY,
+            "the stack must not grow without bound"
+        );
     }
 }

@@ -134,6 +134,16 @@ body {
   color: var(--text);
 }
 
+.history {
+  display: flex;
+  gap: 4px;
+}
+
+.ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .spacer {
   flex: 1;
 }
