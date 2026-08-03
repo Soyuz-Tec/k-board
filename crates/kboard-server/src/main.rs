@@ -41,44 +41,86 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use kboard_core::document::{Document, ScopeId};
 use kboard_core::op::StampedOp;
+use kboard_core::ports::{OpLog, SnapshotStore};
+use kboard_store::SqliteStore;
 
 use crate::limits::RateLimiter;
 use crate::room::{Refused, Room};
 
+/// Rooms and their durable store, behind one lock.
+///
+/// Deliberately one lock rather than two. Every write touches both — accept an
+/// operation, append it — and separate locks would need an ordering rule that
+/// somebody would eventually get backwards.
+struct ServerState {
+    rooms: HashMap<String, Room>,
+    store: SqliteStore,
+}
+
 #[derive(Clone)]
 struct AppState {
     /// A `std::sync::Mutex` is correct here only because no lock is ever held
-    /// across an `.await`. Every critical section below is synchronous.
-    rooms: Arc<Mutex<HashMap<String, Room>>>,
+    /// across an `.await`. Every critical section below is synchronous,
+    /// including the SQLite writes.
+    state: Arc<Mutex<ServerState>>,
     next_connection: Arc<AtomicU64>,
     wasm_path: PathBuf,
 }
 
 impl AppState {
-    fn lock_rooms(&self) -> std::sync::MutexGuard<'_, HashMap<String, Room>> {
-        self.rooms
+    fn lock(&self) -> std::sync::MutexGuard<'_, ServerState> {
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Access a room, creating it if capacity allows.
+    /// Access a room, restoring or creating it if capacity allows.
     ///
     /// Returns `None` when the room cap is reached. Rooms are minted from URL
     /// paths, so without a cap any visitor can allocate unbounded state.
-    fn with_room<T>(&self, scope: &str, action: impl FnOnce(&mut Room) -> T) -> Option<T> {
-        let mut rooms = self.lock_rooms();
-        if !rooms.contains_key(scope) && rooms.len() >= limits::MAX_ROOMS {
+    ///
+    /// A room absent from memory is restored from durable storage before it is
+    /// created empty. That is what makes a restart survivable: the first person
+    /// back into a board rebuilds it from the log rather than finding it blank.
+    fn with_room<T>(
+        &self,
+        scope: &str,
+        action: impl FnOnce(&mut Room, &mut SqliteStore) -> T,
+    ) -> Option<T> {
+        let mut state = self.lock();
+        if !state.rooms.contains_key(scope) && state.rooms.len() >= limits::MAX_ROOMS {
             return None;
         }
-        let room = rooms
-            .entry(scope.to_owned())
-            .or_insert_with(|| Room::new(ScopeId::new(scope)));
-        Some(action(room))
+
+        if !state.rooms.contains_key(scope) {
+            let id = ScopeId::new(scope);
+            // A store that cannot answer must not lose the board: fall back to
+            // an empty room and let the operation log rebuild it on the next
+            // successful read, rather than refusing the connection.
+            let room = match state.store.restore(&id) {
+                Ok(restored) => Room::restored(id, restored),
+                Err(error) => {
+                    eprintln!("k-board: could not restore {scope}: {error}");
+                    Room::new(id)
+                }
+            };
+            state.rooms.insert(scope.to_owned(), room);
+        }
+
+        let ServerState { rooms, store } = &mut *state;
+        rooms.get_mut(scope).map(|room| action(room, store))
     }
 
-    /// Access a room only if it already exists — never creates one.
-    fn with_existing<T>(&self, scope: &str, action: impl FnOnce(&mut Room) -> T) -> Option<T> {
-        self.lock_rooms().get_mut(scope).map(action)
+    /// Access a room only if it is already in memory — never restores, never
+    /// creates. Used by reads, so polling cannot mint state.
+    fn with_existing<T>(
+        &self,
+        scope: &str,
+        action: impl FnOnce(&mut Room, &mut SqliteStore) -> T,
+    ) -> Option<T> {
+        let mut state = self.lock();
+        let ServerState { rooms, store } = &mut *state;
+        rooms.get_mut(scope).map(|room| action(room, store))
     }
 }
 
@@ -132,8 +174,26 @@ async fn main() {
             .unwrap_or_else(|_| "target/wasm32-unknown-unknown/release/kboard.wasm".to_owned()),
     );
 
+    // Durability is always on; whether it survives the process depends on
+    // whether a path was given. One code path either way, so the in-memory
+    // case cannot drift from the durable one.
+    let store = match std::env::var("KBOARD_DB") {
+        Ok(path) => SqliteStore::open(&path).map(|store| (store, Some(path))),
+        Err(_) => SqliteStore::in_memory().map(|store| (store, None)),
+    };
+    let (store, database) = match store {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("k-board: cannot open store: {error}");
+            std::process::exit(1);
+        }
+    };
+
     let state = AppState {
-        rooms: Arc::new(Mutex::new(HashMap::new())),
+        state: Arc::new(Mutex::new(ServerState {
+            rooms: HashMap::new(),
+            store,
+        })),
         next_connection: Arc::new(AtomicU64::new(0)),
         wasm_path,
     };
@@ -163,6 +223,10 @@ async fn main() {
 
     println!("k-board server listening on http://{address}");
     println!("  open http://{address}/ in two tabs to see convergence");
+    match &database {
+        Some(path) => println!("  storing boards in {path}"),
+        None => println!("  WARNING: in-memory store — boards are lost on restart (set KBOARD_DB)"),
+    }
     println!("  WARNING: no authentication — trusted networks only");
 
     if let Err(error) = axum::serve(listener, app)
@@ -190,7 +254,8 @@ fn spawn_room_sweeper(state: AppState) {
         loop {
             ticker.tick().await;
             let now = Instant::now();
-            let mut rooms = state.lock_rooms();
+            let mut guard = state.lock();
+            let rooms = &mut guard.rooms;
             let before = rooms.len();
             rooms.retain(|_, room| !room.is_reclaimable(now));
             let reclaimed = before - rooms.len();
@@ -257,7 +322,7 @@ async fn room_stats(Path(scope): Path<String>, State(state): State<AppState>) ->
     }
     // Reads must not mint rooms; otherwise polling stats is itself an
     // allocation vector.
-    match state.with_existing(&scope, |room| room.stats()) {
+    match state.with_existing(&scope, |room, _store| room.stats()) {
         Some(stats) => axum::Json(stats).into_response(),
         None => (StatusCode::NOT_FOUND, "no such room").into_response(),
     }
@@ -288,7 +353,7 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
 
     let (mut outbound, mut inbound) = socket.split();
 
-    let joined = state.with_room(&scope, |room| {
+    let joined = state.with_room(&scope, |room, _store| {
         let updates = room.subscribe();
         let payload = serde_json::to_string(&ServerMessage::Init {
             actor: connection,
@@ -374,18 +439,47 @@ async fn session(socket: WebSocket, scope: String, state: AppState) {
             // Relay only what the room accepted. Broadcasting a refused batch
             // would leave peers holding operations this room does not have —
             // divergence introduced by the server itself.
-            let outcome =
-                receiving_state.with_existing(&receiving_scope, |room| match room.accept(&ops) {
+            let outcome = receiving_state.with_existing(&receiving_scope, |room, store| {
+                let scope = ScopeId::new(&receiving_scope);
+                match room.accept(&ops) {
                     Ok(_) => {
+                        // Durable before broadcast. A peer that received an
+                        // operation the log never recorded would hold state the
+                        // board cannot rebuild after a restart, and no retry
+                        // fixes that because the client believes it was saved.
+                        if let Err(error) = store.append(&scope, &ops) {
+                            eprintln!(
+                                "k-board: durable append failed for {receiving_scope}: {error}"
+                            );
+                            return Err(Refused::NotDurable);
+                        }
+
+                        if room.snapshot_due() {
+                            // Best-effort: the log alone still rebuilds the
+                            // board, so a failed snapshot costs replay time
+                            // rather than data.
+                            match store.store(&scope, room.snapshot()) {
+                                Ok(()) => room.mark_snapshotted(),
+                                Err(error) => eprintln!(
+                                    "k-board: snapshot failed for {receiving_scope}: {error}"
+                                ),
+                            }
+                        }
+
                         room.broadcast(connection, relayed);
                         Ok(())
                     }
                     Err(refused) => Err(refused),
-                });
+                }
+            });
 
             match outcome {
                 Some(Ok(())) => {}
                 Some(Err(Refused::BatchTooLarge)) => break,
+                // Closing rather than continuing: a client whose writes are not
+                // being recorded should find out now, not when it reconnects to
+                // a board missing its work.
+                Some(Err(Refused::NotDurable)) => break,
                 Some(Err(Refused::RoomFull)) => continue,
                 None => break, // The room was reclaimed underneath us.
             }

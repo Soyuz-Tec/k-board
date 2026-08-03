@@ -136,6 +136,12 @@ jobs:
       - name: Two-replica convergence
         run: node scripts/two-replica-check.mjs
 
+      # Kills the server and starts a new process against the same database.
+      # Nothing short of an actual restart demonstrates that a board survives
+      # the process that was holding it.
+      - name: Restart durability
+        run: node scripts/restart-durability-check.mjs
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
