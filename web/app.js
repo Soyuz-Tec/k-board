@@ -10,6 +10,7 @@
 import { loadEngine } from "./kboard.js";
 import { bounds, drawShape, pack, sceneBounds, toSvg } from "./scene.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
+import * as clipboard from "./clipboard.js";
 
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
@@ -18,6 +19,7 @@ const statusText = document.getElementById("statusText");
 const hint = document.getElementById("hint");
 const a11yList = document.getElementById("a11yList");
 const peerList = document.getElementById("peerList");
+const selectionText = document.getElementById("selectionText");
 const undoButton = document.getElementById("undo");
 const redoButton = document.getElementById("redo");
 const pngButton = document.getElementById("exportPng");
@@ -43,6 +45,10 @@ const state = {
   dirty: true,
   // Throwaway. Never reaches the engine, never reaches the log.
   presence: new Presence(),
+  selection: null,
+  pointer: null,
+  // Only reached when the system clipboard is unavailable or refused.
+  localClipboard: {},
 };
 
 // -- geometry --------------------------------------------------------------
@@ -62,6 +68,25 @@ function hitTest(sceneX, sceneY) {
     }
   }
   return null;
+}
+
+/** The selected element, or null — read from the scene so it cannot go stale. */
+function selected() {
+  if (state.selection === null) return null;
+  return state.scene.find((item) => item.id === state.selection) ?? null;
+}
+
+/**
+ * Select an element, or nothing.
+ *
+ * Announced as well as drawn: an outline says nothing to a screen reader, and
+ * every shortcut in this file acts on whatever is selected.
+ */
+function select(id) {
+  if (state.selection === id) return;
+  state.selection = id;
+  describeSelection();
+  invalidate();
 }
 
 function toScene(clientX, clientY) {
@@ -90,6 +115,12 @@ function invalidate() {
  */
 function sceneChanged() {
   if (state.board !== null) state.scene = state.engine.scene(state.board);
+  // A peer may have deleted whatever was selected. Holding the id would leave
+  // Delete and Copy pointed at something that is no longer there.
+  if (state.selection !== null && !state.scene.some((item) => item.id === state.selection)) {
+    state.selection = null;
+  }
+  describeSelection();
   describeForScreenReaders();
   refreshControls();
   state.dirty = true;
@@ -151,10 +182,31 @@ function render() {
   for (const item of state.scene) drawShape(context, item);
   if (state.draft) drawShape(context, state.draft);
 
+  const chosen = selected();
+  if (chosen) drawSelection(chosen);
+
   // Above the drawing and outside the scene transform: a cursor is a pointer,
   // not an object on the board.
   const peers = state.presence.list();
   if (peers.length > 0) drawCursors(context, peers, { ...state.view, ratio });
+}
+
+/**
+ * Outline the selection.
+ *
+ * Drawn in scene space so it tracks the shape, but with a width divided by the
+ * zoom so it stays one hairline at any magnification — an outline that thickens
+ * as you zoom in stops reading as an annotation and starts looking drawn on.
+ */
+function drawSelection(item) {
+  const box = bounds(item);
+  const pad = 4 / state.view.scale;
+  context.save();
+  context.strokeStyle = "#1971c2";
+  context.lineWidth = 1.5 / state.view.scale;
+  context.setLineDash([5 / state.view.scale, 4 / state.view.scale]);
+  context.strokeRect(box.x - pad, box.y - pad, box.w + pad * 2, box.h + pad * 2);
+  context.restore();
 }
 
 function frame() {
@@ -203,12 +255,25 @@ function describeForScreenReaders() {
     ...items.map((item, index) => {
       const box = bounds(item);
       const entry = document.createElement("li");
-      entry.textContent = `${item.kind} ${index + 1}, at ${Math.round(box.x)}, ${Math.round(
-        box.y,
-      )}, ${Math.round(box.w)} by ${Math.round(box.h)}`;
+      entry.textContent = `${item.kind} ${index + 1}, ${describeItem(item)}`;
       return entry;
     }),
   );
+}
+
+function describeSelection() {
+  const chosen = selected();
+  const readout = chosen
+    ? `Selected: ${chosen.kind}, ${describeItem(chosen)}.`
+    : "Nothing selected.";
+  if (selectionText.textContent !== readout) selectionText.textContent = readout;
+}
+
+function describeItem(item) {
+  const box = bounds(item);
+  return `at ${Math.round(box.x)}, ${Math.round(box.y)}, ${Math.round(box.w)} by ${Math.round(
+    box.h,
+  )}`;
 }
 
 // -- sync ------------------------------------------------------------------
@@ -302,6 +367,68 @@ function connect() {
   socket.onerror = () => socket.close();
 }
 
+// -- clipboard -------------------------------------------------------------
+
+/**
+ * Add elements to the board and select the last one.
+ *
+ * Selecting the result is what makes a paste followed by a drag feel like one
+ * gesture instead of two.
+ */
+function insert(elements) {
+  if (state.board === null || elements.length === 0) return;
+  let last = null;
+  for (const element of elements) {
+    last = state.engine.exec(state.board, clipboard.toCommand(element));
+  }
+  flush();
+  sceneChanged();
+  select(last);
+}
+
+async function copySelection({ cut = false } = {}) {
+  const chosen = selected();
+  if (!chosen) return;
+
+  const where = await clipboard.writeText(clipboard.serialise([chosen]), state.localClipboard);
+  if (cut) {
+    state.engine.exec(state.board, { cmd: "delete", id: chosen.id });
+    flush();
+    sceneChanged();
+  }
+  setStatus(
+    "live",
+    where === "system"
+      ? `${cut ? "cut" : "copied"} · ${state.scope}`
+      : `${cut ? "cut" : "copied"} · this tab only`,
+  );
+}
+
+async function paste() {
+  if (state.board === null) return;
+  const elements = clipboard.parse(await clipboard.readText(state.localClipboard));
+  // Not an error: the clipboard is shared with every other application, and
+  // most of what is on it was never meant for this board.
+  if (!elements) return;
+  insert(clipboard.place(elements, state.pointer));
+}
+
+/** A copy without involving the clipboard, so it cannot clobber what is on it. */
+function duplicateSelection() {
+  const chosen = selected();
+  if (!chosen) return;
+  const copied = clipboard.parse(clipboard.serialise([chosen]));
+  if (copied) insert(clipboard.place(copied, null));
+}
+
+function deleteSelection() {
+  const chosen = selected();
+  if (!chosen) return;
+  state.engine.exec(state.board, { cmd: "delete", id: chosen.id });
+  flush();
+  sceneChanged();
+}
+
 // -- presence --------------------------------------------------------------
 
 /**
@@ -383,8 +510,8 @@ canvas.addEventListener("pointerdown", (event) => {
 
   if (state.tool === "select") {
     const target = hitTest(x, y);
+    select(target?.id ?? null);
     if (target) {
-      const box = bounds(target);
       state.drag = {
         id: target.id,
         offsetX: x - target.x,
@@ -414,6 +541,10 @@ canvas.addEventListener("pointermove", (event) => {
   }
 
   const [x, y] = toScene(event.clientX, event.clientY);
+  // Remembered so a paste lands where the user is looking rather than where
+  // the copy happened to be, which means nothing on a board that has since
+  // been panned — or on a different board entirely.
+  state.pointer = { x, y };
   reportCursor(x, y);
 
   if (state.drag) {
@@ -635,8 +766,53 @@ window.addEventListener("keydown", (event) => {
       stepHistory(false);
       return;
     }
+    if (key === "c" || key === "x") {
+      // Only claimed when something is selected, so the browser's own copy of
+      // selected page text still works when the board is not the subject.
+      if (!selected()) return;
+      event.preventDefault();
+      copySelection({ cut: key === "x" });
+      return;
+    }
+    if (key === "v") {
+      event.preventDefault();
+      paste();
+      return;
+    }
+    if (key === "d") {
+      event.preventDefault();
+      duplicateSelection();
+      return;
+    }
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+  if (event.key === "Delete" || event.key === "Backspace") {
+    if (!selected()) return;
+    event.preventDefault();
+    deleteSelection();
+    return;
+  }
+  if (event.key === "Escape") {
+    select(null);
+    return;
+  }
+  // Cycles what is selected, so every shortcut above is reachable without a
+  // pointer. Only when the canvas has focus — Tab must still move through the
+  // toolbar for everyone else.
+  if (event.key === "Tab" && document.activeElement === canvas && state.scene.length > 0) {
+    event.preventDefault();
+    const at = state.scene.findIndex((item) => item.id === state.selection);
+    const count = state.scene.length;
+    const step = event.shiftKey ? -1 : 1;
+    // With nothing selected, forwards starts at the first element and
+    // backwards at the last, rather than at whatever the modulus happens to
+    // produce for an index of -1.
+    const next = at === -1 ? (step === 1 ? 0 : count - 1) : (at + step + count) % count;
+    select(state.scene[next].id);
+    return;
+  }
+
   const tool = SHORTCUTS[event.key.toLowerCase()];
   if (tool) selectTool(tool);
 });
