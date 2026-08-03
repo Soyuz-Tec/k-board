@@ -56,15 +56,39 @@ function recorder() {
     ellipse(cx, cy, rx, ry) {
       commands.push(["E", round(cx), round(cy), round(rx), round(ry)]);
     },
+    set font(_) {},
+    set textBaseline(_) {},
+    fillText(content, x, y) {
+      commands.push(["T", round(x), round(y), content]);
+    },
     fill() {},
     stroke() {},
   };
 }
 
+function unescapeText(value) {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 /** Read the same commands back out of SVG markup. */
 function parseSvg(markup) {
   const commands = [];
-  for (const [, attributes] of markup.matchAll(/<(?:path|ellipse)\s([^>]*)\/>/g)) {
+  // One pass in document order. Collecting text separately would compare the
+  // two back-ends in different orders and report drift that is not there.
+  const figures = /<text\s[^>]*>(.*?)<\/text>|<(?:path|ellipse)\s([^>]*)\/>/g;
+  for (const [, spans, attributes] of markup.matchAll(figures)) {
+    if (spans !== undefined) {
+      const tspans = /<tspan x="([-\d.]+)" y="([-\d.]+)">(.*?)<\/tspan>/g;
+      for (const [, x, y, content] of spans.matchAll(tspans)) {
+        commands.push(["T", Number(x), Number(y), unescapeText(content)]);
+      }
+      continue;
+    }
     const ellipse = /cx="([-\d.]+)" cy="([-\d.]+)" rx="([-\d.]+)" ry="([-\d.]+)"/.exec(attributes);
     if (ellipse) {
       commands.push(["E", ...ellipse.slice(1, 5).map(Number)]);
@@ -99,6 +123,19 @@ const scene = [
       [545, 315],
       [560, 350],
     ],
+  },
+  {
+    kind: "text",
+    x: 600,
+    y: 100,
+    w: 180,
+    h: 50,
+    stroke: 0x1e1e1eff,
+    fill: 0,
+    stroke_width: 2,
+    font_size: 20,
+    // A second line, and characters that must not become markup.
+    text: 'label <one> & "two"\nsecond line',
   },
 ];
 
@@ -158,6 +195,19 @@ check(
   "an SVG path with no fill attribute fills black by default",
 );
 check("a filled shape keeps its fill", svg.includes('fill="rgba(255,255,0,1)"'));
+check(
+  "text is emitted as text rather than as an outline",
+  svg.includes("<text ") && svg.includes("<tspan "),
+);
+check(
+  "angle brackets and ampersands in a label cannot become markup",
+  svg.includes("&lt;one&gt;") && svg.includes("&amp;") && !svg.includes("<one>"),
+);
+check(
+  "typed whitespace survives the trip",
+  svg.includes('xml:space="preserve"'),
+  "SVG collapses whitespace by default and would silently reflow the label",
+);
 check("an empty scene exports nothing rather than a blank file", toSvg([]) === null);
 check("an empty scene has no bounds", sceneBounds([]) === null);
 

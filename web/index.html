@@ -33,6 +33,9 @@
         <button data-tool="freedraw" class="tool" aria-pressed="false" title="Pen (P)">
           <span aria-hidden="true">&#9998;</span><span class="label">Pen</span>
         </button>
+        <button data-tool="text" class="tool" aria-pressed="false" title="Text (T)">
+          <span aria-hidden="true">&#84;</span><span class="label">Text</span>
+        </button>
         <button data-tool="eraser" class="tool" aria-pressed="false" title="Eraser (E)">
           <span aria-hidden="true">&#9003;</span><span class="label">Erase</span>
         </button>
@@ -93,6 +96,19 @@
         <p id="peerList">You are the only one here.</p>
         <p id="selectionText">Nothing selected.</p>
       </section>
+
+      <!--
+        A real textarea rather than a caret drawn on the canvas: it brings
+        selection, an IME, spellcheck and screen-reader support with it, all of
+        which would be worse if reimplemented and wrong in most cases.
+      -->
+      <textarea
+        id="editor"
+        hidden
+        rows="1"
+        spellcheck="false"
+        aria-label="Text content"
+      ></textarea>
 
       <div id="hint" class="hint">
         <strong>Open this page in a second tab</strong> — both are separate

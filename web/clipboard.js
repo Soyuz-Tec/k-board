@@ -40,6 +40,7 @@ export function serialise(items) {
       fill: item.fill,
       stroke_width: item.stroke_width,
       ...(item.points ? { points: item.points } : {}),
+      ...(item.text != null ? { text: item.text, font_size: item.font_size } : {}),
     })),
   });
 }
@@ -121,6 +122,18 @@ export function place(elements, at) {
  * it converges, replicates, and undoes without any special case anywhere.
  */
 export function toCommand(element) {
+  if (element.kind === "text") {
+    return {
+      cmd: "text",
+      x: element.x,
+      y: element.y,
+      w: element.w,
+      h: element.h,
+      text: element.text ?? "",
+      font_size: element.font_size ?? 20,
+      stroke: element.stroke ?? 0,
+    };
+  }
   if (element.kind === "freedraw") {
     return {
       cmd: "stroke",

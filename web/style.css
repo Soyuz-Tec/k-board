@@ -200,6 +200,24 @@ canvas.select-mode {
   cursor: default;
 }
 
+#editor {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 1px dashed var(--accent);
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  /* Same origin, font and line height the canvas will use, so the words land
+     within about a pixel of where they were typed. Not identical: a textarea
+     centres each line in its line box using the font's own metrics, which
+     nothing outside the browser can read, so the two conventions agree closely
+     rather than exactly. */
+  transform-origin: top left;
+}
+
 /* Focusable for keyboard selection, so the focus has to be visible. */
 canvas:focus-visible {
   outline: 2px solid var(--accent);

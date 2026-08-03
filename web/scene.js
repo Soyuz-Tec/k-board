@@ -38,6 +38,30 @@ export function unpack(packed) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
+// -- typography ------------------------------------------------------------
+
+/**
+ * The one font both back-ends name.
+ *
+ * A generic family rather than a specific face: an SVG opened on a machine
+ * without the font falls back to something, and the width the author measured
+ * would no longer be the width it draws at. Sticking to what every system has
+ * keeps the measured box honest in more places than naming a favourite would.
+ */
+export const FONT_FAMILY = "ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif";
+
+/** Multiplied by the font size. Matches what the editor's textarea uses. */
+export const LINE_HEIGHT = 1.25;
+
+export function fontFor(size) {
+  return `${size}px ${FONT_FAMILY}`;
+}
+
+/** Text is stored with its newlines; every consumer needs the same split. */
+export function lines(item) {
+  return String(item.text ?? "").split("\n");
+}
+
 // -- geometry --------------------------------------------------------------
 
 /** The axis-aligned box an element occupies, with negative extents normalised. */
@@ -98,6 +122,31 @@ export function geometry(item) {
   const box = bounds(item);
 
   switch (item.kind) {
+    case "text":
+      // Not a path. Both back-ends draw glyphs, and neither can express them
+      // as one — so the description says so rather than pretending otherwise.
+      {
+        const size = item.font_size || 20;
+        return {
+          fillable: false,
+          figures: [
+            {
+              text: {
+                size,
+                // Baselines are computed here rather than in each back-end.
+                // The same arithmetic written twice is two formulas that
+                // merely happen to agree today.
+                rows: lines(item).map((content, index) => ({
+                  content,
+                  x: box.x,
+                  y: box.y + size * LINE_HEIGHT * (index + 1) - size * 0.25,
+                })),
+              },
+            },
+          ],
+        };
+      }
+
     case "ellipse":
       return {
         fillable: true,
@@ -204,6 +253,15 @@ export function drawShape(context, item) {
   if (filled) context.fillStyle = unpack(item.fill);
 
   for (const figure of figures) {
+    if (figure.text) {
+      // Filled, not stroked: outlined glyphs are illegible at label sizes.
+      context.fillStyle = unpack(item.stroke);
+      context.font = fontFor(figure.text.size);
+      context.textBaseline = "alphabetic";
+      for (const row of figure.text.rows) context.fillText(row.content, row.x, row.y);
+      continue;
+    }
+
     context.beginPath();
     if (figure.ellipse) {
       const { cx, cy, rx, ry } = figure.ellipse;
@@ -252,6 +310,21 @@ function elementMarkup(item) {
     `stroke-width="${n(item.stroke_width || 2)}" stroke-linejoin="round" stroke-linecap="round"`;
 
   return figures.map((figure) => {
+    if (figure.text) {
+      const { rows, size } = figure.text;
+      const spans = rows
+        .map(
+          (row) =>
+            `<tspan x="${n(row.x)}" y="${n(row.y)}">${escapeText(row.content)}</tspan>`,
+        )
+        .join("");
+      // `xml:space` preserved so leading indentation a user typed survives the
+      // trip; SVG collapses whitespace by default and would silently reflow it.
+      return (
+        `<text xml:space="preserve" font-family="${escapeText(FONT_FAMILY)}" ` +
+        `font-size="${n(size)}" fill="${unpack(item.stroke)}">${spans}</text>`
+      );
+    }
     if (figure.ellipse) {
       const { cx, cy, rx, ry } = figure.ellipse;
       return `<ellipse cx="${n(cx)}" cy="${n(cy)}" rx="${n(rx)}" ry="${n(ry)}" ${paint}/>`;
