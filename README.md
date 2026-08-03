@@ -181,12 +181,13 @@ pixels to be painting for content to be readable.
   loopback-only refusal when no secret is set
 - Client-side PNG and SVG export, cropped to the board rather than the
   viewport, from one geometry description shared with the on-screen renderer
+- Presence: live peer cursors, relayed but never merged, stored, or logged
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
-- Presence: live peer cursors and selection
+- Presence: shared selection, and names rather than actor ids
 - Text elements; images
 - Multi-select, resize, rotate
 - Headless renderer (`lyon` → `resvg`) so a *server* can render a board without

@@ -148,6 +148,11 @@ jobs:
       - name: Authentication
         run: node scripts/auth-check.mjs
 
+      # The interesting assertions are negative: cursors must reach peers
+      # *without* being accepted into the document or written to the log.
+      - name: Presence
+        run: node scripts/presence-check.mjs
+
       # Drives the canvas and SVG back-ends from one scene and compares what
       # each drew. An export that does not match the screen is only discovered
       # after the file has been sent.

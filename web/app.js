@@ -9,6 +9,7 @@
 
 import { loadEngine } from "./kboard.js";
 import { bounds, drawShape, pack, sceneBounds, toSvg } from "./scene.js";
+import { Presence, drawCursors, peerName } from "./presence.js";
 
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
@@ -16,6 +17,7 @@ const statusDot = document.getElementById("dot");
 const statusText = document.getElementById("statusText");
 const hint = document.getElementById("hint");
 const a11yList = document.getElementById("a11yList");
+const peerList = document.getElementById("peerList");
 const undoButton = document.getElementById("undo");
 const redoButton = document.getElementById("redo");
 const pngButton = document.getElementById("exportPng");
@@ -39,6 +41,8 @@ const state = {
   outbox: [],
   everConnected: false,
   dirty: true,
+  // Throwaway. Never reaches the engine, never reaches the log.
+  presence: new Presence(),
 };
 
 // -- geometry --------------------------------------------------------------
@@ -146,14 +150,44 @@ function render() {
 
   for (const item of state.scene) drawShape(context, item);
   if (state.draft) drawShape(context, state.draft);
+
+  // Above the drawing and outside the scene transform: a cursor is a pointer,
+  // not an object on the board.
+  const peers = state.presence.list();
+  if (peers.length > 0) drawCursors(context, peers, { ...state.view, ratio });
 }
 
 function frame() {
+  // Cheap, and it runs whether or not anything else changed: a peer who stops
+  // sending must stop being drawn even on an otherwise idle board.
+  if (state.presence.expire(performance.now())) peersChanged();
+
   if (state.dirty) {
     state.dirty = false;
     render();
   }
   requestAnimationFrame(frame);
+}
+
+/**
+ * Presence moved. Repaint, and update the readout.
+ *
+ * Separate from `sceneChanged` on purpose: presence is not a document change,
+ * so it must not touch the engine, the accessibility mirror of the drawing, or
+ * the undo controls.
+ */
+function peersChanged() {
+  const peers = state.presence.list();
+  const readout =
+    peers.length === 0
+      ? "You are the only one here."
+      : `Also here: ${peers.map((peer) => peerName(peer.actor)).join(", ")}.`;
+  // Only written when it actually differs. This is a live region, and a peer
+  // moving their mouse changes their position seventeen times a second without
+  // changing who is present — rewriting it each time would make a screen reader
+  // announce the same sentence over and over.
+  if (peerList.textContent !== readout) peerList.textContent = readout;
+  state.dirty = true;
 }
 
 /**
@@ -240,6 +274,11 @@ function connect() {
     } else if (message.type === "ops") {
       state.engine.merge(state.board, JSON.stringify(message.ops));
       sceneChanged();
+    } else if (message.type === "presence") {
+      state.presence.observe(message.actor, message.x, message.y, performance.now());
+      peersChanged();
+    } else if (message.type === "left") {
+      if (state.presence.forget(message.actor)) peersChanged();
     }
   };
 
@@ -251,12 +290,32 @@ function connect() {
       setStatus("offline", "offline · not authorised for this board");
       return;
     }
+    // Nobody is reachable, so nobody's cursor is current. Leaving them on
+    // screen would show a room full of people who cannot see you.
+    state.presence.clear();
+    peersChanged();
     setStatus("offline", "offline · edits are queued");
     // Reconnect, and keep drawing meanwhile. The queue drains on reopen.
     setTimeout(connect, 1200);
   };
 
   socket.onerror = () => socket.close();
+}
+
+// -- presence --------------------------------------------------------------
+
+/**
+ * Tell peers where the pointer is.
+ *
+ * Sent directly rather than through `flush`: the outbox exists so that work
+ * drawn offline is replayed on reconnect, and a cursor position from thirty
+ * seconds ago is not work — replaying it would move a pointer that has since
+ * gone somewhere else.
+ */
+function reportCursor(x, y) {
+  if (state.socket?.readyState !== WebSocket.OPEN) return;
+  if (!state.presence.shouldReport(x, y, performance.now())) return;
+  state.socket.send(JSON.stringify({ type: "presence", x, y }));
 }
 
 // -- input -----------------------------------------------------------------
@@ -355,6 +414,7 @@ canvas.addEventListener("pointermove", (event) => {
   }
 
   const [x, y] = toScene(event.clientX, event.clientY);
+  reportCursor(x, y);
 
   if (state.drag) {
     const now = performance.now();

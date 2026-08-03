@@ -80,6 +80,12 @@
       <section id="a11y" class="sr-only" aria-live="polite">
         <h2>Canvas contents</h2>
         <ul id="a11yList"></ul>
+
+        <!--
+          Peer cursors are pixels, so they say nothing to a screen reader. Who
+          is present is information, not decoration, and it belongs here.
+        -->
+        <p id="peerList">You are the only one here.</p>
       </section>
 
       <div id="hint" class="hint">
