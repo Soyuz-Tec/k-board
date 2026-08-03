@@ -626,8 +626,14 @@ const fn kind_name(kind: ElementKind) -> &'static str {
 /// label. Empty text is refused for a related reason: an element that draws
 /// nothing cannot be selected again to be fixed.
 fn validate_text(text: &str) -> Result<String, BoardError> {
+    // Trailing newlines are dropped: a textarea hands back whatever the user
+    // left behind, and a label ending in a blank line measures taller than it
+    // looks. Leading and interior whitespace is kept — someone who indented a
+    // line meant to, which is also why the SVG export preserves it.
     let trimmed = text.trim_end_matches(['\n', '\r']);
-    if trimmed.is_empty() {
+    // Whitespace alone still draws nothing, so it is refused on the same
+    // grounds as the empty string rather than on the grounds of being empty.
+    if trimmed.trim().is_empty() {
         return Err(BoardError::BadCommand("empty text".into()));
     }
     if trimmed.len() > MAX_TEXT_BYTES {
