@@ -36,24 +36,58 @@ pub enum Refused {
     RoomFull,
     /// More operations in one frame than a legitimate client sends.
     BatchTooLarge,
+    /// The room accepted the batch but durable storage would not record it.
+    /// Reported separately because it is a server fault, not a client one.
+    NotDurable,
 }
+
+/// How many accepted operations may accrue before the room's scene is written
+/// back as a snapshot. Small enough that a crash replays little; large enough
+/// that ordinary drawing does not rewrite the whole document per stroke.
+const SNAPSHOT_EVERY: u64 = 200;
 
 pub struct Room {
     state: Snapshot,
     sender: broadcast::Sender<Fanout>,
     accepted: u64,
+    since_snapshot: u64,
     last_active: Instant,
 }
 
 impl Room {
     pub fn new(scope: ScopeId) -> Self {
+        Self::restored(scope.clone(), Snapshot::empty(scope))
+    }
+
+    /// A room rebuilt from durable storage.
+    ///
+    /// Indistinguishable from a fresh one afterwards: the snapshot already
+    /// holds everything the log described, so nothing downstream needs to know
+    /// whether this board is minutes or months old.
+    pub fn restored(_scope: ScopeId, state: Snapshot) -> Self {
         let (sender, _) = broadcast::channel(1024);
         Self {
-            state: Snapshot::empty(scope),
+            state,
             sender,
             accepted: 0,
+            since_snapshot: 0,
             last_active: Instant::now(),
         }
+    }
+
+    /// Whether enough has accrued to be worth writing the scene back.
+    pub fn snapshot_due(&self) -> bool {
+        self.since_snapshot >= SNAPSHOT_EVERY
+    }
+
+    /// The materialised scene, for writing back to durable storage.
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.state
+    }
+
+    /// Records that the current scene has been persisted.
+    pub fn mark_snapshotted(&mut self) {
+        self.since_snapshot = 0;
     }
 
     pub fn subscribe(&mut self) -> broadcast::Receiver<Fanout> {
@@ -85,6 +119,7 @@ impl Room {
 
         self.last_active = Instant::now();
         self.accepted += ops.len() as u64;
+        self.since_snapshot += ops.len() as u64;
         Ok(self.state.absorb(ops))
     }
 

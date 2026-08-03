@@ -16,6 +16,7 @@ true at the time is what makes the change legible.
 | [0004](0004-global-registry-and-side-buffer.md) | Process-global registry; results via a side buffer | Accepted | Thread-local state breaks on the BEAM; packed returns break on 64-bit |
 | [0005](0005-in-memory-room-state.md) | Rooms hold a materialised document, not a log | Accepted | The log leaked and cost O(document) per message |
 | [0006](0006-server-resource-limits.md) | Bound every resource an unauthenticated peer can consume | Accepted | Three independent denial-of-service routes found in audit |
+| [0007](0007-sqlite-durable-storage.md) | Persist boards in SQLite behind the engine's storage ports | Accepted | ADR-0005 relocated the log to durable storage; nothing implemented it |
 
 ## Not yet recorded
 

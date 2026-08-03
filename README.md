@@ -14,8 +14,11 @@ the standalone deployment has no authentication yet. See
 
 ```bash
 cargo build -p kboard-ffi --target wasm32-unknown-unknown --release
-cargo run -p kboard-server
+KBOARD_DB=boards.db cargo run -p kboard-server
 ```
+
+Without `KBOARD_DB` the store is in-memory and boards vanish on restart; the
+boot banner tells you which mode you are in.
 
 Open <http://127.0.0.1:8080> in **two tabs**. Each tab is an independent
 replica with its own copy of the document. Draw in either one.
@@ -158,11 +161,12 @@ pixels to be painting for content to be readable.
 - Performance baseline ([`docs/benchmarks.md`](docs/benchmarks.md)) captured
   before persistence changes it
 - Dependency policy via `cargo-deny` — licences, duplicates, and sources
+- Durable persistence: SQLite behind the engine's `OpLog`/`SnapshotStore`
+  ports, with boards restored on join ([ADR-0007](docs/adr/0007-sqlite-durable-storage.md))
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
-- Durable persistence behind `OpLog`/`SnapshotStore` — the top gap
 - Undo/redo (cheap here: rewrite the prior value with a fresh stamp)
 - Authentication in the standalone server
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
@@ -189,7 +193,8 @@ pixels to be painting for content to be readable.
 - **`authorize()` in `kboard-server` returns `true` for everyone.** It is marked
   as the seam where a real deployment authenticates. This is the single reason
   the server cannot face a public network.
-- **Rooms are in memory.** Restarting the server loses every board.
+- Boards are durable when `KBOARD_DB` is set; without it the store is
+  in-memory and they are lost on restart. The boot banner says which.
 
 Resource limits *are* enforced — frame size, frame rate, operations per batch,
 elements per room, room count, scope charset and length, and idle-room
