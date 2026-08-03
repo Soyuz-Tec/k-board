@@ -154,7 +154,43 @@ check(
   JSON.stringify(alice.scene()) === JSON.stringify(bob.scene()),
 );
 
-// 5. Deletion converges too.
+// 5. Text is an element like any other: it replicates, and an edit to its
+//    content converges the same way a move does.
+const labelId = alice.exec({
+  cmd: "text",
+  x: 40,
+  y: 500,
+  w: 120,
+  h: 25,
+  text: "hello",
+  font_size: 20,
+  stroke: 0x1e1e1eff,
+});
+await wait(SETTLE_MS);
+
+const labelOnBob = bob.scene().find((item) => item.id === labelId);
+check("a label reaches the peer", labelOnBob?.text === "hello", JSON.stringify(labelOnBob));
+check("and arrives as a text element", labelOnBob?.kind === "text", labelOnBob?.kind);
+
+// The box travels with the words: the peer never measured this font and cannot
+// derive the box for itself.
+check(
+  "the box the author measured travels with it",
+  labelOnBob?.w === 120 && labelOnBob?.h === 25,
+  `${labelOnBob?.w} by ${labelOnBob?.h}`,
+);
+
+bob.exec({ cmd: "set_text", id: labelId, text: "edited by the peer", w: 220, h: 25 });
+await wait(SETTLE_MS);
+const edited = alice.scene().find((item) => item.id === labelId);
+check("an edit converges back", edited?.text === "edited by the peer", JSON.stringify(edited));
+check("and brings the new box with it", edited?.w === 220, `${edited?.w}`);
+
+alice.exec({ cmd: "delete", id: labelId });
+await wait(SETTLE_MS);
+check("a label deletes like anything else", !bob.scene().some((i) => i.id === labelId));
+
+// 6. Deletion converges too.
 bob.exec({ cmd: "delete", id });
 await wait(SETTLE_MS);
 check(

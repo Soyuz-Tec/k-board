@@ -164,7 +164,7 @@ pixels to be painting for content to be readable.
 - C ABI with panic trapping; wasm32 and native from one crate
 - WebSocket sync server with per-room compacting log
 - Browser client: shapes, freehand, select/move, erase, pan, zoom, colours,
-  undo/redo with Ctrl+Z / Ctrl+Shift+Z
+  text, undo/redo with Ctrl+Z / Ctrl+Shift+Z
 - Local-first queueing — draw offline, reconnect, replay
 - DOM accessibility mirror
 - Server hardening: rate limiting, frame/batch caps, room bounds, idle
@@ -186,13 +186,15 @@ pixels to be painting for content to be readable.
   shape can be carried between boards, tabs, and reloads
 - Keyboard selection: Tab cycles, Escape clears, and every clipboard shortcut
   acts on the result
+- Text elements, edited in place through a real textarea, with the measured box
+  stored on the element because the engine has no font
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Presence: shared selection, and names rather than actor ids
-- Text elements; images
+- Images
 - Multi-select, resize, rotate (copy and paste currently act on one shape)
 - Headless renderer (`lyon` → `resvg`) so a *server* can render a board without
   a browser — the client-side export above does not cover thumbnails or

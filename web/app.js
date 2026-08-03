@@ -8,7 +8,7 @@
  */
 
 import { loadEngine } from "./kboard.js";
-import { bounds, drawShape, pack, sceneBounds, toSvg } from "./scene.js";
+import { LINE_HEIGHT, bounds, drawShape, fontFor, pack, sceneBounds, toSvg } from "./scene.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
 import * as clipboard from "./clipboard.js";
 
@@ -20,6 +20,7 @@ const hint = document.getElementById("hint");
 const a11yList = document.getElementById("a11yList");
 const peerList = document.getElementById("peerList");
 const selectionText = document.getElementById("selectionText");
+const editor = document.getElementById("editor");
 const undoButton = document.getElementById("undo");
 const redoButton = document.getElementById("redo");
 const pngButton = document.getElementById("exportPng");
@@ -49,6 +50,9 @@ const state = {
   pointer: null,
   // Only reached when the system clipboard is unavailable or refused.
   localClipboard: {},
+  // The element being typed into, or null. Never in `scene`: an in-progress
+  // edit belongs to one person until they finish it.
+  editing: null,
 };
 
 // -- geometry --------------------------------------------------------------
@@ -95,6 +99,100 @@ function toScene(clientX, clientY) {
     (clientX - rect.left - state.view.x) / state.view.scale,
     (clientY - rect.top - state.view.y) / state.view.scale,
   ];
+}
+
+// -- text ------------------------------------------------------------------
+
+const DEFAULT_FONT_SIZE = 20;
+
+/**
+ * Measure a label with the canvas that will draw it.
+ *
+ * The engine stores the box rather than deriving it, because measuring text
+ * needs a font engine and the engine deliberately has none. Measuring here —
+ * with the same context, at the same size, in the same font — is the only way
+ * the stored box is the box the words actually occupy.
+ */
+function measureText(text, size) {
+  context.save();
+  context.font = fontFor(size);
+  const rows = text.split("\n");
+  const width = Math.max(...rows.map((row) => context.measureText(row).width), 0);
+  context.restore();
+  return { w: Math.ceil(width), h: Math.ceil(rows.length * size * LINE_HEIGHT) };
+}
+
+/**
+ * Open the overlay editor over a point on the board.
+ *
+ * A real `<textarea>` rather than a canvas-drawn caret: it brings selection,
+ * an IME, spellcheck, screen-reader support, and the platform's own text
+ * conventions with it. Reimplementing any of those on a canvas would be worse
+ * in every case and wrong in most of them.
+ */
+function beginTextEdit({ id = null, x, y, text = "", size = DEFAULT_FONT_SIZE }) {
+  state.editing = { id, x, y, size };
+  editor.value = text;
+  editor.style.font = fontFor(size * state.view.scale);
+  editor.style.lineHeight = String(LINE_HEIGHT);
+  editor.style.left = `${x * state.view.scale + state.view.x}px`;
+  editor.style.top = `${y * state.view.scale + state.view.y}px`;
+  editor.style.color = state.colour;
+  editor.hidden = false;
+  fitEditor();
+  editor.focus();
+  editor.setSelectionRange(text.length, text.length);
+  // The element being edited is hidden underneath, so the words are not drawn
+  // twice at slightly different positions.
+  invalidate();
+}
+
+/** Grow the textarea with its content, so nothing is typed out of sight. */
+function fitEditor() {
+  const size = state.editing.size * state.view.scale;
+  const { w, h } = measureText(editor.value || " ", size);
+  editor.style.width = `${w + size}px`;
+  editor.style.height = `${h}px`;
+}
+
+/**
+ * Commit what was typed, or discard it.
+ *
+ * Emptying an existing label deletes it. The alternative is an element with
+ * nothing to draw, which cannot be clicked to be fixed and cannot be seen to
+ * be deleted.
+ */
+function endTextEdit() {
+  const editing = state.editing;
+  if (!editing) return;
+  state.editing = null;
+  editor.hidden = true;
+  const text = editor.value.replace(/\s+$/, "");
+  editor.value = "";
+  canvas.focus();
+
+  if (state.board !== null) {
+    const { w, h } = measureText(text, editing.size);
+    if (text === "") {
+      if (editing.id) state.engine.exec(state.board, { cmd: "delete", id: editing.id });
+    } else if (editing.id) {
+      state.engine.exec(state.board, { cmd: "set_text", id: editing.id, text, w, h });
+    } else {
+      const id = state.engine.exec(state.board, {
+        cmd: "text",
+        x: editing.x,
+        y: editing.y,
+        w,
+        h,
+        text,
+        font_size: editing.size,
+        stroke: pack(state.colour),
+      });
+      state.selection = id;
+    }
+    flush();
+  }
+  sceneChanged();
 }
 
 // -- rendering -------------------------------------------------------------
@@ -179,7 +277,12 @@ function render() {
   const { x, y, scale } = state.view;
   context.setTransform(ratio * scale, 0, 0, ratio * scale, ratio * x, ratio * y);
 
-  for (const item of state.scene) drawShape(context, item);
+  for (const item of state.scene) {
+    // Drawn by the textarea instead, so the words do not appear twice a pixel
+    // apart while someone is typing them.
+    if (item.id === state.editing?.id) continue;
+    drawShape(context, item);
+  }
   if (state.draft) drawShape(context, state.draft);
 
   const chosen = selected();
@@ -271,9 +374,12 @@ function describeSelection() {
 
 function describeItem(item) {
   const box = bounds(item);
-  return `at ${Math.round(box.x)}, ${Math.round(box.y)}, ${Math.round(box.w)} by ${Math.round(
-    box.h,
-  )}`;
+  const where = `at ${Math.round(box.x)}, ${Math.round(box.y)}, ${Math.round(
+    box.w,
+  )} by ${Math.round(box.h)}`;
+  // The words are the content. Reading out a label's dimensions and not what it
+  // says would describe the box and omit the point of it.
+  return item.text ? `"${item.text.replace(/\n/g, " ")}", ${where}` : where;
 }
 
 // -- sync ------------------------------------------------------------------
@@ -508,6 +614,20 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
+  if (state.tool === "text") {
+    const target = hitTest(x, y);
+    // Clicking an existing label edits it rather than starting a new one on
+    // top of it, which is what a second click on words obviously means.
+    if (target?.text !== undefined && target?.text !== null) {
+      select(target.id);
+      beginTextEdit({ id: target.id, ...bounds(target), text: target.text, size: target.font_size });
+    } else {
+      select(null);
+      beginTextEdit({ x, y });
+    }
+    return;
+  }
+
   if (state.tool === "select") {
     const target = hitTest(x, y);
     select(target?.id ?? null);
@@ -530,6 +650,17 @@ canvas.addEventListener("pointerdown", (event) => {
       ? { kind: "freedraw", x, y, w: 0, h: 0, points: [[x, y]], stroke, fill: 0, stroke_width: 2 }
       : { kind: state.tool, x, y, w: 0, h: 0, stroke, fill: 0, stroke_width: 2 };
   invalidate();
+});
+
+canvas.addEventListener("wheel", () => endTextEdit(), { passive: true });
+
+canvas.addEventListener("dblclick", (event) => {
+  if (state.board === null) return;
+  const [x, y] = toScene(event.clientX, event.clientY);
+  const target = hitTest(x, y);
+  if (target?.text === undefined || target?.text === null) return;
+  select(target.id);
+  beginTextEdit({ id: target.id, ...bounds(target), text: target.text, size: target.font_size });
 });
 
 canvas.addEventListener("pointermove", (event) => {
@@ -729,6 +860,21 @@ for (const swatch of document.querySelectorAll(".swatch")) {
   });
 }
 
+editor.addEventListener("input", fitEditor);
+// Clicking away commits. That is what a click away from a text box means
+// everywhere else, and the alternative is losing the words to a stray click.
+editor.addEventListener("blur", () => endTextEdit());
+editor.addEventListener("keydown", (event) => {
+  // Enter adds a line, as it does in every other multi-line field. Escape and
+  // Ctrl+Enter finish. Everything else — selection, undo inside the field,
+  // IME composition — is the platform's, and is left alone deliberately.
+  if (event.key === "Escape" || (event.key === "Enter" && (event.metaKey || event.ctrlKey))) {
+    event.preventDefault();
+    endTextEdit();
+  }
+  event.stopPropagation();
+});
+
 undoButton.addEventListener("click", () => stepHistory(true));
 redoButton.addEventListener("click", () => stepHistory(false));
 pngButton.addEventListener("click", exportPng);
@@ -748,10 +894,15 @@ const SHORTCUTS = {
   d: "diamond",
   a: "arrow",
   p: "freedraw",
+  t: "text",
   e: "eraser",
 };
 
 window.addEventListener("keydown", (event) => {
+  // Every shortcut below acts on the board. While someone is typing, the keys
+  // belong to the field — otherwise "d" duplicates a shape instead of being
+  // written, and Delete erases the selection instead of a character.
+  if (state.editing) return;
   // Undo shortcuts are the one place a modifier is expected, so they are
   // handled before the plain tool shortcuts bail out on one.
   if ((event.metaKey || event.ctrlKey) && !event.altKey) {

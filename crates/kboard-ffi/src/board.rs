@@ -14,7 +14,7 @@ use kboard_core::document::{Document, MergeError, ScopeId};
 use kboard_core::element::ElementId;
 use kboard_core::frac;
 use kboard_core::op::{self, Op, StampedOp};
-use kboard_core::prop::{ElementKind, Point, PropKey, PropValue};
+use kboard_core::prop::{ElementKind, Point, PropKey, PropValue, MAX_TEXT_BYTES};
 
 /// A command from a host. JSON-tagged so the wire surface stays one string in,
 /// one string out — the narrowest thing that works across every FFI host.
@@ -40,6 +40,30 @@ pub enum Command {
         stroke: u32,
         #[serde(default = "default_stroke_width")]
         stroke_width: f64,
+    },
+    /// Create a text element.
+    ///
+    /// The box is supplied rather than derived: measuring text needs a font
+    /// engine, and this crate deliberately has none. The host measures with
+    /// whatever it renders with, which is the only way the box can be right.
+    Text {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        text: String,
+        #[serde(default = "default_font_size")]
+        font_size: f64,
+        #[serde(default)]
+        stroke: u32,
+    },
+    /// Replace the content of an existing text element, and the box the host
+    /// measured for it.
+    SetText {
+        id: String,
+        text: String,
+        w: f64,
+        h: f64,
     },
     Move {
         id: String,
@@ -68,6 +92,10 @@ const fn default_stroke_width() -> f64 {
     2.0
 }
 
+const fn default_font_size() -> f64 {
+    20.0
+}
+
 /// One element, flattened for rendering. The client never walks the CRDT.
 #[derive(Clone, Debug, Serialize)]
 pub struct SceneItem {
@@ -83,6 +111,10 @@ pub struct SceneItem {
     pub z: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub points: Option<Vec<[f64; 2]>>,
+    /// Present only on text elements, so a host can tell "no text" from "".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub font_size: f64,
 }
 
 #[derive(Debug)]
@@ -326,6 +358,52 @@ impl Board {
                 Ok(Some(id.to_hex()))
             }
 
+            Command::Text {
+                x,
+                y,
+                w,
+                h,
+                text,
+                font_size,
+                stroke,
+            } => {
+                let text = validate_text(text)?;
+                let id = self.mint_id();
+                let z = self.document.z_index_for_top();
+                let props = vec![
+                    (PropKey::Kind, PropValue::Kind(ElementKind::Text)),
+                    (PropKey::X, PropValue::Num(*x)),
+                    (PropKey::Y, PropValue::Num(*y)),
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                    (PropKey::Text, PropValue::Text(text)),
+                    (PropKey::FontSize, PropValue::Num(*font_size)),
+                    (PropKey::Stroke, PropValue::Color(*stroke)),
+                    (PropKey::ZIndex, PropValue::Text(z)),
+                ];
+                let ops = op::upsert(id, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, creation(id, props));
+                Ok(Some(id.to_hex()))
+            }
+
+            Command::SetText { id, text, w, h } => {
+                let text = validate_text(text)?;
+                let element = self.require(id)?;
+                // Content and box move together. Writing one without the other
+                // leaves a label that no longer fits the shape it describes,
+                // and a hit test that misses the words on screen.
+                let props = vec![
+                    (PropKey::Text, PropValue::Text(text)),
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                ];
+                let keys: Vec<PropKey> = props.iter().map(|(key, _)| key.clone()).collect();
+                let backward = self.capture(element, &keys);
+                let ops = op::upsert(element, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, mutation(element, backward, props));
+                Ok(Some(id.clone()))
+            }
+
             Command::Move { id, x, y } => {
                 let element = self.require(id)?;
                 let props = vec![
@@ -463,6 +541,11 @@ impl Board {
                 points: element
                     .points()
                     .map(|path| path.iter().map(|p| [p.x, p.y]).collect()),
+                text: match element.get(&PropKey::Text) {
+                    Some(PropValue::Text(text)) => Some(text.clone()),
+                    _ => None,
+                },
+                font_size: element.num_or(PropKey::FontSize, 20.0),
             })
             .collect()
     }
@@ -536,6 +619,26 @@ const fn kind_name(kind: ElementKind) -> &'static str {
     }
 }
 
+/// Refuse text the document would not keep.
+///
+/// The engine drops an oversized value on write rather than storing it, so
+/// without this a host would be told its edit succeeded and then find an empty
+/// label. Empty text is refused for a related reason: an element that draws
+/// nothing cannot be selected again to be fixed.
+fn validate_text(text: &str) -> Result<String, BoardError> {
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return Err(BoardError::BadCommand("empty text".into()));
+    }
+    if trimmed.len() > MAX_TEXT_BYTES {
+        return Err(BoardError::BadCommand(format!(
+            "text is {} bytes, over the {MAX_TEXT_BYTES} limit",
+            trimmed.len()
+        )));
+    }
+    Ok(trimmed.to_owned())
+}
+
 fn parse_kind(name: &str) -> Result<ElementKind, BoardError> {
     Ok(match name {
         "rectangle" => ElementKind::Rectangle,
@@ -571,6 +674,162 @@ mod tests {
             )
             .unwrap()
             .unwrap()
+    }
+
+    fn add_text(board: &mut Board, text: &str) -> String {
+        board
+            .exec(
+                &Command::Text {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 120.0,
+                    h: 24.0,
+                    text: text.into(),
+                    font_size: 20.0,
+                    stroke: 0x1E1E1EFF,
+                },
+                1_000,
+            )
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn text_is_readable_back_off_the_scene() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_text(&mut board, "hello");
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.kind, "text");
+        assert_eq!(item.text.as_deref(), Some("hello"));
+        assert_eq!(item.font_size, 20.0);
+        assert_eq!(item.w, 120.0);
+    }
+
+    #[test]
+    fn a_shape_carries_no_text_at_all() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_rect(&mut board, 0.0);
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        // Not `Some("")`. A host has to be able to tell a label with an empty
+        // string from a rectangle, and the distinction is the option itself.
+        assert_eq!(item.text, None);
+    }
+
+    #[test]
+    fn editing_text_moves_the_box_with_it() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_text(&mut board, "hi");
+
+        board
+            .exec(
+                &Command::SetText {
+                    id: id.clone(),
+                    text: "a much longer label".into(),
+                    w: 300.0,
+                    h: 24.0,
+                },
+                2_000,
+            )
+            .unwrap();
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.text.as_deref(), Some("a much longer label"));
+        // A box left at its old width would hit-test to the wrong region and
+        // export cropped through the middle of the words.
+        assert_eq!(item.w, 300.0);
+    }
+
+    #[test]
+    fn an_edit_to_text_can_be_undone() {
+        let mut board = Board::open("t/b", 1);
+        let id = add_text(&mut board, "before");
+
+        board
+            .exec(
+                &Command::SetText {
+                    id: id.clone(),
+                    text: "after".into(),
+                    w: 90.0,
+                    h: 24.0,
+                },
+                2_000,
+            )
+            .unwrap();
+        assert!(board.undo(3_000));
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.text.as_deref(), Some("before"));
+        assert_eq!(item.w, 120.0, "the box must come back with the words");
+    }
+
+    #[test]
+    fn empty_text_is_refused_rather_than_created_invisible() {
+        let mut board = Board::open("t/b", 1);
+        for empty in ["", "   \n", "\n\n"] {
+            let result = board.exec(
+                &Command::Text {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                    text: empty.into(),
+                    font_size: 20.0,
+                    stroke: 0,
+                },
+                1_000,
+            );
+            // An element that draws nothing cannot be selected again to fix.
+            assert!(result.is_err(), "{empty:?} should be refused");
+        }
+        assert!(board.scene().is_empty());
+    }
+
+    #[test]
+    fn text_over_the_limit_is_refused_rather_than_silently_dropped() {
+        let mut board = Board::open("t/b", 1);
+        let result = board.exec(
+            &Command::Text {
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+                text: "x".repeat(MAX_TEXT_BYTES + 1),
+                font_size: 20.0,
+                stroke: 0,
+            },
+            1_000,
+        );
+        // The engine refuses the value on write, so without this the host would
+        // be told the edit succeeded and then find an empty label.
+        assert!(result.is_err());
+        assert!(board.scene().is_empty());
+    }
+
+    #[test]
+    fn a_trailing_newline_does_not_become_part_of_the_label() {
+        let mut board = Board::open("t/b", 1);
+        // A textarea hands back whatever the user left behind, and a label that
+        // ends in a blank line is measured taller than it looks.
+        let id = add_text(&mut board, "hello\n");
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(item.text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn setting_text_on_something_that_is_not_there_is_an_error() {
+        let mut board = Board::open("t/b", 1);
+        let result = board.exec(
+            &Command::SetText {
+                id: "0123456789abcdef".into(),
+                text: "hello".into(),
+                w: 10.0,
+                h: 10.0,
+            },
+            1_000,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
