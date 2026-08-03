@@ -13,6 +13,9 @@ repository.workspace = true
 [lib]
 name = "kboard_core"
 crate-type = ["lib", "cdylib", "staticlib"]
+# The lib has no libtest benches, and leaving this on makes `cargo bench` run
+# the unit-test harness, which rejects criterion's arguments.
+bench = false
 
 [dependencies]
 serde = { workspace = true }
@@ -20,6 +23,13 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+criterion = { workspace = true }
+
+# Criterion supplies its own argument parsing, so the default libtest harness
+# has to be off or `cargo bench` cannot pass it filters and output flags.
+[[bench]]
+name = "engine"
+harness = false
 
 [features]
 default = ["json"]

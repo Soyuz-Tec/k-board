@@ -10,8 +10,16 @@ repository.workspace = true
 [lib]
 name = "kboard"
 crate-type = ["lib", "cdylib", "staticlib"]
+bench = false
 
 [dependencies]
-kboard-core = { path = "../kboard-core" }
+kboard-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "scene"
+harness = false

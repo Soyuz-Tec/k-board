@@ -1,0 +1,48 @@
+# Dependency policy for k-board.
+#
+# `cargo-audit` covers published advisories. It does not cover licences,
+# duplicate versions, or unexpected sources — and for a crate whose whole
+# purpose is being linked into other people's products, the licence tree is not
+# a detail. Anyone embedding this inherits every obligation in it.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+# US spelling: the key name is the tool's, not ours.
+[licenses]
+version = 2
+# Rejecting anything not on this list is deliberate. A new dependency arriving
+# under an unlisted licence should be a decision, not a silent inheritance.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+# Duplicate major versions are warnings rather than errors: they usually arrive
+# through a transitive dependency nobody here controls, and blocking on them
+# would mean pinning other people's trees.
+multiple-versions = "warn"
+wildcards = "deny"
+# `highest` would hide a duplicate behind whichever version won. Reporting both
+# is the point.
+skip = []
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
