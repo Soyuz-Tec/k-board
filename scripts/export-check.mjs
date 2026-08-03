@@ -208,6 +208,15 @@ check(
   svg.includes('xml:space="preserve"'),
   "SVG collapses whitespace by default and would silently reflow the label",
 );
+check(
+  "a faded element carries its opacity",
+  toSvg([{ ...scene[0], opacity: 0.4 }]).includes('opacity="0.4"'),
+);
+check(
+  "a solid one does not",
+  // Otherwise every element in the file carries an attribute saying "unchanged".
+  !svg.includes('opacity="1"'),
+);
 check("an empty scene exports nothing rather than a blank file", toSvg([]) === null);
 check("an empty scene has no bounds", sceneBounds([]) === null);
 

@@ -153,6 +153,11 @@ jobs:
       - name: Presence
         run: node scripts/presence-check.mjs
 
+      # A client that resends its whole idea of an element's look silently
+      # reverts a colleague's concurrent restyle. The assertion is negative.
+      - name: Style
+        run: node scripts/style-check.mjs
+
       # Scaling a stroke without its path, or stretching a label on one axis,
       # both look fine on a rectangle and fall apart on everything else.
       - name: Transform

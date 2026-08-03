@@ -190,6 +190,8 @@ pixels to be painting for content to be readable.
   stored on the element because the engine has no font
 - Multi-select by marquee or shift-click; move, resize and rotate a selection
   as one thing
+- Stroke colour, fill, width and opacity, applied to the selection and to what
+  is drawn next — each control sending only what it changed
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 

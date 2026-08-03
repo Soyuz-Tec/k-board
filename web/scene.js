@@ -301,9 +301,14 @@ export function drawShape(context, item) {
   const { fillable, figures } = geometry(item);
   const filled = fillable && (item.fill & 255) !== 0;
   const spin = rotation(item);
+  const alpha = item.opacity ?? 1;
+  const faded = alpha < 1;
 
-  if (spin) {
+  if (spin || faded) {
     context.save();
+  }
+  if (faded) context.globalAlpha = alpha;
+  if (spin) {
     context.translate(spin.cx, spin.cy);
     context.rotate(spin.angle);
     context.translate(-spin.cx, -spin.cy);
@@ -341,7 +346,7 @@ export function drawShape(context, item) {
     context.stroke();
   }
 
-  if (spin) context.restore();
+  if (spin || faded) context.restore();
 }
 
 // -- SVG back-end ----------------------------------------------------------
@@ -370,9 +375,13 @@ function pathData(figure) {
 function elementMarkup(item) {
   const { fillable, figures } = geometry(item);
   const filled = fillable && (item.fill & 255) !== 0;
+  const alpha = item.opacity ?? 1;
   const paint =
     `fill="${filled ? unpack(item.fill) : "none"}" stroke="${unpack(item.stroke)}" ` +
-    `stroke-width="${n(item.stroke_width || 2)}" stroke-linejoin="round" stroke-linecap="round"`;
+    `stroke-width="${n(item.stroke_width || 2)}" stroke-linejoin="round" stroke-linecap="round"` +
+    // Omitted when solid, so the common case does not carry an attribute
+    // saying "unchanged" on every element in the file.
+    (alpha < 1 ? ` opacity="${n(alpha)}"` : "");
 
   const markup = figures.map((figure) => {
     if (figure.text) {
@@ -387,7 +396,9 @@ function elementMarkup(item) {
       // trip; SVG collapses whitespace by default and would silently reflow it.
       return (
         `<text xml:space="preserve" font-family="${escapeText(FONT_FAMILY)}" ` +
-        `font-size="${n(size)}" fill="${unpack(item.stroke)}">${spans}</text>`
+        `font-size="${n(size)}" fill="${unpack(item.stroke)}"` +
+        (alpha < 1 ? ` opacity="${n(alpha)}"` : "") +
+        `>${spans}</text>`
       );
     }
     if (figure.ellipse) {

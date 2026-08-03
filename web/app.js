@@ -45,6 +45,9 @@ const state = {
   scope: location.hash.slice(1) || "demo",
   tool: "select",
   colour: "#1e1e1e",
+  fill: "none",
+  strokeWidth: 2,
+  opacity: 1,
   view: { x: 0, y: 0, scale: 1 },
   scene: [],
   draft: null,
@@ -115,8 +118,24 @@ function select(ids) {
     return;
   }
   state.selection = next;
+  adoptStyleOfSelection();
   describeSelection();
   invalidate();
+}
+
+/**
+ * Show the selection's own style in the controls.
+ *
+ * Without this the toolbar keeps describing the last thing drawn, and someone
+ * nudging the opacity slider to see the current value would instead set it.
+ */
+function adoptStyleOfSelection() {
+  const only = onlySelected();
+  if (!only) return;
+  state.strokeWidth = only.stroke_width || 2;
+  state.opacity = only.opacity ?? 1;
+  opacityInput.value = String(Math.round(state.opacity * 100));
+  markChecked(widthButtons, widthButtons.find((b) => Number(b.dataset.width) === state.strokeWidth));
 }
 
 /** Add or remove one element, for shift-clicking a selection together. */
@@ -289,7 +308,7 @@ function drawGrid(width, height) {
   const step = 24 * state.view.scale;
   if (step < 9) return;
   const style = getComputedStyle(document.documentElement);
-  context.fillStyle = style.getPropertyValue("--grid").trim() || "#eee";
+  context.fillStyle = style.getPropertyValue("--canvas-grid").trim() || "#eee";
   const startX = state.view.x % step;
   const startY = state.view.y % step;
   for (let x = startX; x < width; x += step) {
@@ -648,6 +667,49 @@ function reportCursor(x, y) {
   state.socket.send(JSON.stringify({ type: "presence", x, y }));
 }
 
+// -- style -----------------------------------------------------------------
+
+/** Fully opaque black with the alpha byte set, or 0 for "no fill". */
+function packOrNone(colour) {
+  return colour === "none" ? 0 : pack(colour);
+}
+
+/** The look a newly drawn shape takes. */
+function currentStyle() {
+  return {
+    stroke: pack(state.colour),
+    fill: packOrNone(state.fill),
+    stroke_width: state.strokeWidth,
+    opacity: state.opacity,
+  };
+}
+
+/**
+ * Change a style property.
+ *
+ * Applied to the selection *and* remembered for the next shape. Separating
+ * those is the arrangement where someone restyles a shape and then wonders why
+ * the next one came out with the old colour.
+ *
+ * Only the changed field is sent. Resending the others would overwrite a peer's
+ * concurrent restyle with values this client merely happens to be holding.
+ */
+function applyStyle(change) {
+  const chosen = selected();
+  for (const item of chosen) {
+    state.engine.exec(state.board, { cmd: "style", id: item.id, ...change });
+  }
+  if (chosen.length > 0) {
+    flush();
+    sceneChanged();
+  }
+}
+
+/** Reflect a radio group's selection, since these are buttons rather than inputs. */
+function markChecked(group, chosen) {
+  for (const button of group) button.setAttribute("aria-checked", String(button === chosen));
+}
+
 // -- gestures --------------------------------------------------------------
 
 /**
@@ -715,12 +777,18 @@ function commitDraft() {
 
   if (draft.kind === "freedraw") {
     if ((draft.points?.length ?? 0) < 2) return;
-    state.engine.exec(state.board, {
+    const id = state.engine.exec(state.board, {
       cmd: "stroke",
       points: draft.points,
       stroke: draft.stroke,
       stroke_width: draft.stroke_width,
     });
+    // `stroke` has no opacity of its own — a path carries no fill, so the
+    // command that creates one takes no look beyond its colour and width. The
+    // id comes back from exec rather than being guessed at from the scene.
+    if (draft.opacity < 1) {
+      state.engine.exec(state.board, { cmd: "style", id, opacity: draft.opacity });
+    }
   } else {
     // Ignore accidental click-sized shapes.
     if (Math.abs(draft.w) < 3 && Math.abs(draft.h) < 3) return;
@@ -734,6 +802,7 @@ function commitDraft() {
       stroke: draft.stroke,
       fill: draft.fill,
       stroke_width: draft.stroke_width,
+      opacity: draft.opacity,
     });
   }
   flush();
@@ -815,11 +884,11 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
-  const stroke = pack(state.colour);
+  const style = currentStyle();
   state.draft =
     state.tool === "freedraw"
-      ? { kind: "freedraw", x, y, w: 0, h: 0, points: [[x, y]], stroke, fill: 0, stroke_width: 2 }
-      : { kind: state.tool, x, y, w: 0, h: 0, stroke, fill: 0, stroke_width: 2 };
+      ? { kind: "freedraw", x, y, w: 0, h: 0, points: [[x, y]], ...style }
+      : { kind: state.tool, x, y, w: 0, h: 0, ...style };
   invalidate();
 });
 
@@ -1030,14 +1099,40 @@ for (const button of document.querySelectorAll(".tool")) {
   button.addEventListener("click", () => selectTool(button.dataset.tool));
 }
 
-for (const swatch of document.querySelectorAll(".swatch")) {
+const strokeSwatches = [...document.querySelectorAll(".swatch[data-colour]")];
+for (const swatch of strokeSwatches) {
   swatch.addEventListener("click", () => {
     state.colour = swatch.dataset.colour;
-    for (const other of document.querySelectorAll(".swatch")) {
-      other.setAttribute("aria-checked", String(other === swatch));
-    }
+    markChecked(strokeSwatches, swatch);
+    applyStyle({ stroke: pack(state.colour) });
+    // A label is drawn in the stroke colour, so an open editor has to follow.
+    editor.style.color = state.colour;
   });
 }
+
+const fillSwatches = [...document.querySelectorAll(".swatch[data-fill]")];
+for (const swatch of fillSwatches) {
+  swatch.addEventListener("click", () => {
+    state.fill = swatch.dataset.fill;
+    markChecked(fillSwatches, swatch);
+    applyStyle({ fill: packOrNone(state.fill) });
+  });
+}
+
+const widthButtons = [...document.querySelectorAll(".width")];
+for (const button of widthButtons) {
+  button.addEventListener("click", () => {
+    state.strokeWidth = Number(button.dataset.width);
+    markChecked(widthButtons, button);
+    applyStyle({ stroke_width: state.strokeWidth });
+  });
+}
+
+const opacityInput = document.getElementById("opacity");
+opacityInput.addEventListener("input", () => {
+  state.opacity = Number(opacityInput.value) / 100;
+  applyStyle({ opacity: state.opacity });
+});
 
 editor.addEventListener("input", fitEditor);
 // Clicking away commits. That is what a click away from a text box means
