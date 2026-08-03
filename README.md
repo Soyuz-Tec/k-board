@@ -155,7 +155,11 @@ pixels to be painting for content to be readable.
 - Server hardening: rate limiting, frame/batch caps, room bounds, idle
   reclamation, scope validation, security headers
 - Architecture decision records
-- CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit
+- Performance baseline ([`docs/benchmarks.md`](docs/benchmarks.md)) captured
+  before persistence changes it
+- Dependency policy via `cargo-deny` — licences, duplicates, and sources
+- CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
+  dependency policy, benchmark compilation
 
 **Next**
 - Durable persistence behind `OpLog`/`SnapshotStore` — the top gap
@@ -168,6 +172,12 @@ pixels to be painting for content to be readable.
 - Authentication in the standalone server — `authorize()` admits everyone today
 - Undo/redo; text elements; images
 - Framework-agnostic Web Component packaging
+
+**Measured, not yet addressed**
+- `board/scene` costs **10.3 ms** at 10,000 elements, and **20.5 ms** once
+  serialised — past a 60 fps frame budget before anything is drawn. The
+  projection re-sorts and re-allocates the whole board on every change.
+  See [`docs/benchmarks.md`](docs/benchmarks.md).
 
 **Deliberately not yet decided**
 - Text CRDT. Text is currently a last-writer-wins property, so concurrent edits

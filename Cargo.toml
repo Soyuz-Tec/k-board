@@ -10,8 +10,16 @@ license = "MIT"
 repository = "https://github.com/Soyuz-Tec/k-board"
 
 [workspace.dependencies]
+# Carries a version as well as a path. A path-only dependency resolves as a
+# wildcard, which crates.io refuses to publish — so the engine could not be
+# released as the embeddable artifact it exists to be.
+kboard-core = { path = "crates/kboard-core", version = "0.1.0" }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `default-features = false` drops the plotting stack, which pulls a large
+# transitive tree for HTML reports nobody reads in CI.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]
 opt-level = 3

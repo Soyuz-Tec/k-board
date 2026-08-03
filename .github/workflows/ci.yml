@@ -39,6 +39,12 @@ jobs:
       - name: Doc tests
         run: cargo test --workspace --doc
 
+      # Compiled, not run. Benchmark timings on a shared runner are noise, but a
+      # bench that stops compiling is a real break and would otherwise only
+      # surface the next time somebody measured.
+      - name: Benchmarks compile
+        run: cargo build --workspace --benches
+
   wasm:
     name: wasm32 build
     runs-on: ubuntu-latest
@@ -136,7 +142,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit
         run: cargo audit
+
+      # cargo-audit covers published advisories only. This covers licences,
+      # duplicate versions, and dependency sources — which matter more here,
+      # because anyone embedding the engine inherits its whole licence tree.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Dependency policy
+        run: cargo deny check
