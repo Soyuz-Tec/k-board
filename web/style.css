@@ -200,6 +200,12 @@ canvas.select-mode {
   cursor: default;
 }
 
+/* Focusable for keyboard selection, so the focus has to be visible. */
+canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .hint {
   position: absolute;
   left: 50%;

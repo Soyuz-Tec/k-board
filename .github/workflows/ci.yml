@@ -153,6 +153,11 @@ jobs:
       - name: Presence
         run: node scripts/presence-check.mjs
 
+      # A copy that kept its element id would rewrite the original instead of
+      # adding a shape — a "paste" that silently moves what you copied.
+      - name: Clipboard
+        run: node scripts/clipboard-check.mjs
+
       # Drives the canvas and SVG back-ends from one scene and compares what
       # each drew. An export that does not match the screen is only discovered
       # after the file has been sent.

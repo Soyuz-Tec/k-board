@@ -182,6 +182,10 @@ pixels to be painting for content to be readable.
 - Client-side PNG and SVG export, cropped to the board rather than the
   viewport, from one geometry description shared with the on-screen renderer
 - Presence: live peer cursors, relayed but never merged, stored, or logged
+- Copy, cut, paste, duplicate and delete — on the *system* clipboard, so a
+  shape can be carried between boards, tabs, and reloads
+- Keyboard selection: Tab cycles, Escape clears, and every clipboard shortcut
+  acts on the result
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
@@ -189,7 +193,7 @@ pixels to be painting for content to be readable.
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
 - Presence: shared selection, and names rather than actor ids
 - Text elements; images
-- Multi-select, resize, rotate
+- Multi-select, resize, rotate (copy and paste currently act on one shape)
 - Headless renderer (`lyon` → `resvg`) so a *server* can render a board without
   a browser — the client-side export above does not cover thumbnails or
   notification previews

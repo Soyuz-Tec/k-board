@@ -70,7 +70,12 @@
     </header>
 
     <main>
-      <canvas id="canvas" aria-label="Drawing canvas"></canvas>
+      <canvas
+        id="canvas"
+        tabindex="0"
+        role="application"
+        aria-label="Drawing canvas. Tab cycles the selection, Escape clears it."
+      ></canvas>
 
       <!--
         The accessibility tree. Canvas content is invisible to assistive
@@ -86,6 +91,7 @@
           is present is information, not decoration, and it belongs here.
         -->
         <p id="peerList">You are the only one here.</p>
+        <p id="selectionText">Nothing selected.</p>
       </section>
 
       <div id="hint" class="hint">
