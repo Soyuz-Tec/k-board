@@ -8,6 +8,7 @@
  */
 
 import { loadEngine } from "./kboard.js";
+import { bounds, drawShape, pack, sceneBounds, toSvg } from "./scene.js";
 
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
@@ -17,6 +18,8 @@ const hint = document.getElementById("hint");
 const a11yList = document.getElementById("a11yList");
 const undoButton = document.getElementById("undo");
 const redoButton = document.getElementById("redo");
+const pngButton = document.getElementById("exportPng");
+const svgButton = document.getElementById("exportSvg");
 
 const COMMIT_INTERVAL_MS = 50; // live-drag update rate sent to peers
 
@@ -38,50 +41,7 @@ const state = {
   dirty: true,
 };
 
-// -- colour ----------------------------------------------------------------
-
-function pack(hex, alpha = 255) {
-  const value = Number.parseInt(hex.slice(1), 16);
-  return (
-    ((((value >>> 16) & 255) << 24) |
-      (((value >>> 8) & 255) << 16) |
-      ((value & 255) << 8) |
-      alpha) >>>
-    0
-  );
-}
-
-function unpack(packed) {
-  const r = (packed >>> 24) & 255;
-  const g = (packed >>> 16) & 255;
-  const b = (packed >>> 8) & 255;
-  const a = (packed & 255) / 255;
-  return `rgba(${r},${g},${b},${a})`;
-}
-
 // -- geometry --------------------------------------------------------------
-
-function bounds(item) {
-  if (item.points?.length) {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const [x, y] of item.points) {
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    }
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-  }
-  return {
-    x: Math.min(item.x, item.x + item.w),
-    y: Math.min(item.y, item.y + item.h),
-    w: Math.abs(item.w),
-    h: Math.abs(item.h),
-  };
-}
 
 function hitTest(sceneX, sceneY) {
   const slack = 6 / state.view.scale;
@@ -127,17 +87,21 @@ function invalidate() {
 function sceneChanged() {
   if (state.board !== null) state.scene = state.engine.scene(state.board);
   describeForScreenReaders();
-  refreshHistoryControls();
+  refreshControls();
   state.dirty = true;
 }
 
 // Reads the engine rather than tracking it here, so the buttons can never
 // disagree with what undo would actually do.
-function refreshHistoryControls() {
+function refreshControls() {
   if (state.board === null) return;
   const { canUndo, canRedo } = state.engine.history(state.board);
   undoButton.disabled = !canUndo;
   redoButton.disabled = !canRedo;
+  // An export of an empty board is a blank file that looks like a failure.
+  const empty = state.scene.length === 0;
+  pngButton.disabled = empty;
+  svgButton.disabled = empty;
 }
 
 function stepHistory(backward) {
@@ -148,76 +112,6 @@ function stepHistory(backward) {
   if (!moved) return;
   flush();
   sceneChanged();
-}
-
-function drawShape(item) {
-  const box = bounds(item);
-  context.strokeStyle = unpack(item.stroke);
-  context.lineWidth = item.stroke_width || 2;
-  context.lineJoin = "round";
-  context.lineCap = "round";
-
-  const filled = (item.fill & 255) !== 0;
-  if (filled) context.fillStyle = unpack(item.fill);
-
-  switch (item.kind) {
-    case "ellipse": {
-      context.beginPath();
-      context.ellipse(box.x + box.w / 2, box.y + box.h / 2, box.w / 2, box.h / 2, 0, 0, Math.PI * 2);
-      if (filled) context.fill();
-      context.stroke();
-      break;
-    }
-    case "diamond": {
-      context.beginPath();
-      context.moveTo(box.x + box.w / 2, box.y);
-      context.lineTo(box.x + box.w, box.y + box.h / 2);
-      context.lineTo(box.x + box.w / 2, box.y + box.h);
-      context.lineTo(box.x, box.y + box.h / 2);
-      context.closePath();
-      if (filled) context.fill();
-      context.stroke();
-      break;
-    }
-    case "arrow": {
-      const x2 = item.x + item.w;
-      const y2 = item.y + item.h;
-      const angle = Math.atan2(item.h, item.w);
-      const head = Math.min(16, Math.hypot(item.w, item.h) / 3);
-      context.beginPath();
-      context.moveTo(item.x, item.y);
-      context.lineTo(x2, y2);
-      context.moveTo(x2, y2);
-      context.lineTo(x2 - head * Math.cos(angle - 0.4), y2 - head * Math.sin(angle - 0.4));
-      context.moveTo(x2, y2);
-      context.lineTo(x2 - head * Math.cos(angle + 0.4), y2 - head * Math.sin(angle + 0.4));
-      context.stroke();
-      break;
-    }
-    case "freedraw": {
-      const path = item.points ?? [];
-      if (path.length === 0) break;
-      context.beginPath();
-      context.moveTo(path[0][0], path[0][1]);
-      // Quadratic smoothing through midpoints: cheap, and much better looking
-      // than straight segments between raw pointer samples.
-      for (let index = 1; index < path.length - 1; index += 1) {
-        const [cx, cy] = path[index];
-        const [nx, ny] = path[index + 1];
-        context.quadraticCurveTo(cx, cy, (cx + nx) / 2, (cy + ny) / 2);
-      }
-      const last = path[path.length - 1];
-      context.lineTo(last[0], last[1]);
-      context.stroke();
-      break;
-    }
-    default: {
-      context.beginPath();
-      context.rect(box.x, box.y, box.w, box.h);
-      if (filled) context.fill();
-      context.stroke();
-    }
-  }
 }
 
 function drawGrid(width, height) {
@@ -250,8 +144,8 @@ function render() {
   const { x, y, scale } = state.view;
   context.setTransform(ratio * scale, 0, 0, ratio * scale, ratio * x, ratio * y);
 
-  for (const item of state.scene) drawShape(item);
-  if (state.draft) drawShape(state.draft);
+  for (const item of state.scene) drawShape(context, item);
+  if (state.draft) drawShape(context, state.draft);
 }
 
 function frame() {
@@ -539,6 +433,88 @@ canvas.addEventListener(
   { passive: false },
 );
 
+// -- export ----------------------------------------------------------------
+
+/**
+ * Whole board, not the viewport.
+ *
+ * An export is the drawing, not a screenshot of where the author happened to be
+ * looking — so it is cropped to the content and rendered at its own scale,
+ * ignoring pan and zoom entirely. The grid is left out for the same reason: it
+ * is an affordance for drawing, not something anyone means to send.
+ */
+const EXPORT_PADDING = 16;
+const EXPORT_PIXEL_SCALE = 2; // a PNG that still reads on a high-density screen
+
+/**
+ * Always light, never the page background.
+ *
+ * A file that comes out dark because the author's laptop was in dark mode is a
+ * file that renders differently for whoever receives it. Every colour in the
+ * palette is chosen to read on white, so white is what they are exported on.
+ */
+const EXPORT_BACKGROUND = "#ffffff";
+
+/** `tenant-a:board` is a legal scope and an illegal Windows filename. */
+function exportName(extension) {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const scope = state.scope.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return `${scope}-${stamp}.${extension}`;
+}
+
+function download(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  // Revoked on the next turn: revoking synchronously can beat the navigation
+  // the click just started.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function exportSvg() {
+  const svg = toSvg(state.scene, {
+    padding: EXPORT_PADDING,
+    background: EXPORT_BACKGROUND,
+    title: `k-board ${state.scope}`,
+  });
+  if (svg === null) return setStatus("offline", "nothing to export");
+  download(new Blob([svg], { type: "image/svg+xml" }), exportName("svg"));
+}
+
+function exportPng() {
+  const box = sceneBounds(state.scene);
+  if (box === null) return setStatus("offline", "nothing to export");
+
+  const width = box.w + EXPORT_PADDING * 2;
+  const height = box.h + EXPORT_PADDING * 2;
+  const sheet = document.createElement("canvas");
+  sheet.width = Math.max(1, Math.round(width * EXPORT_PIXEL_SCALE));
+  sheet.height = Math.max(1, Math.round(height * EXPORT_PIXEL_SCALE));
+
+  const paper = sheet.getContext("2d");
+  paper.fillStyle = EXPORT_BACKGROUND;
+  paper.fillRect(0, 0, sheet.width, sheet.height);
+  paper.setTransform(
+    EXPORT_PIXEL_SCALE,
+    0,
+    0,
+    EXPORT_PIXEL_SCALE,
+    -(box.x - EXPORT_PADDING) * EXPORT_PIXEL_SCALE,
+    -(box.y - EXPORT_PADDING) * EXPORT_PIXEL_SCALE,
+  );
+
+  // The same drawing routine the screen uses, so the file cannot disagree
+  // with what the author was looking at.
+  for (const item of state.scene) drawShape(paper, item);
+
+  sheet.toBlob((blob) => {
+    if (blob) download(blob, exportName("png"));
+    else setStatus("offline", "export failed");
+  }, "image/png");
+}
+
 // -- chrome ----------------------------------------------------------------
 
 function selectTool(tool) {
@@ -564,6 +540,8 @@ for (const swatch of document.querySelectorAll(".swatch")) {
 
 undoButton.addEventListener("click", () => stepHistory(true));
 redoButton.addEventListener("click", () => stepHistory(false));
+pngButton.addEventListener("click", exportPng);
+svgButton.addEventListener("click", exportSvg);
 
 document.getElementById("clear").addEventListener("click", () => {
   if (state.board === null) return;

@@ -179,16 +179,20 @@ pixels to be painting for content to be readable.
   converges like any other edit and reaches collaborators
 - Per-scope bearer authentication, enforced on the WebSocket handshake, with a
   loopback-only refusal when no secret is set
+- Client-side PNG and SVG export, cropped to the board rather than the
+  viewport, from one geometry description shared with the on-screen renderer
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
 
 **Next**
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
-- Headless renderer (`lyon` → `resvg`) for server-side SVG/PNG
+- Presence: live peer cursors and selection
+- Text elements; images
+- Multi-select, resize, rotate
+- Headless renderer (`lyon` → `resvg`) so a *server* can render a board without
+  a browser — the client-side export above does not cover thumbnails or
+  notification previews
 - GPU renderer (`wgpu`/`vello`) with a WebGL2 fallback
-- Durable storage behind `OpLog`/`SnapshotStore` (currently in memory)
-- Authentication in the standalone server — `authorize()` admits everyone today
-- Undo/redo; text elements; images
 - Framework-agnostic Web Component packaging
 
 **Measured, not yet addressed**
