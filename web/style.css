@@ -134,7 +134,8 @@ body {
   color: var(--text);
 }
 
-.history {
+.history,
+.export {
   display: flex;
   gap: 4px;
 }

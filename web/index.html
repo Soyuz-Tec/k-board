@@ -51,6 +51,16 @@
         <button id="redo" class="ghost" disabled title="Redo (Ctrl+Shift+Z)">Redo</button>
       </div>
 
+      <!--
+        Export is client-side: the board never leaves the tab to become a file.
+        Nothing to upload, nothing to wait for, and it works on a local board
+        with no server at all.
+      -->
+      <div class="export" role="group" aria-label="Export">
+        <button id="exportPng" class="ghost" disabled title="Download the board as a PNG">PNG</button>
+        <button id="exportSvg" class="ghost" disabled title="Download the board as an SVG">SVG</button>
+      </div>
+
       <div class="spacer"></div>
 
       <button id="clear" class="ghost" title="Clear the board for everyone">Clear</button>

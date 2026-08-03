@@ -148,6 +148,12 @@ jobs:
       - name: Authentication
         run: node scripts/auth-check.mjs
 
+      # Drives the canvas and SVG back-ends from one scene and compares what
+      # each drew. An export that does not match the screen is only discovered
+      # after the file has been sent.
+      - name: Export fidelity
+        run: node scripts/export-check.mjs
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
