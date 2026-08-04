@@ -393,15 +393,28 @@ impl Board {
                 let id = self.mint_id();
                 let z = self.document.z_index_for_top();
                 let path: Vec<Point> = points.iter().map(|[x, y]| Point::new(*x, *y)).collect();
-                // Freehand geometry lives in `points`; x/y anchor the bounding
-                // box so hit-testing and export do not have to scan the path.
-                let (min_x, min_y) = path.iter().fold((f64::MAX, f64::MAX), |(mx, my), p| {
-                    (mx.min(p.x), my.min(p.y))
-                });
+                // Freehand geometry lives in `points`; the box anchors it so
+                // hit-testing and export do not have to scan the path. The
+                // width and height are part of that: writing only x and y left
+                // every consumer a box of zero size, which is exactly the scan
+                // this is meant to save them.
+                let (min_x, min_y, max_x, max_y) = path.iter().fold(
+                    (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+                    |(min_x, min_y, max_x, max_y), p| {
+                        (
+                            min_x.min(p.x),
+                            min_y.min(p.y),
+                            max_x.max(p.x),
+                            max_y.max(p.y),
+                        )
+                    },
+                );
                 let props = vec![
                     (PropKey::Kind, PropValue::Kind(ElementKind::Freedraw)),
                     (PropKey::X, PropValue::Num(min_x)),
                     (PropKey::Y, PropValue::Num(min_y)),
+                    (PropKey::Width, PropValue::Num(max_x - min_x)),
+                    (PropKey::Height, PropValue::Num(max_y - min_y)),
                     (PropKey::Points, PropValue::Points(path)),
                     (PropKey::Stroke, PropValue::Color(*stroke)),
                     (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
@@ -920,6 +933,28 @@ mod tests {
         // The client multiplies by this unconditionally, so it has to be a
         // number rather than something absent.
         assert_eq!(item.opacity, 1.0);
+    }
+
+    #[test]
+    fn a_stroke_records_the_box_its_path_occupies() {
+        let mut board = Board::open("t/b", 1);
+        let id = board
+            .exec(
+                &Command::Stroke {
+                    points: vec![[10.0, 20.0], [50.0, 5.0], [30.0, 60.0]],
+                    stroke: 0xFF,
+                    stroke_width: 2.0,
+                },
+                1_000,
+            )
+            .unwrap()
+            .unwrap();
+
+        let item = board.scene().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!((item.x, item.y), (10.0, 5.0));
+        // A host that trusted a zero-sized box would have to scan the path
+        // anyway, which is the work the box exists to save.
+        assert_eq!((item.w, item.h), (40.0, 55.0));
     }
 
     #[test]

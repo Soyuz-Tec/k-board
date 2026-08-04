@@ -488,9 +488,20 @@ function describeSelection() {
 
 function describeItem(item) {
   const box = bounds(item);
-  const where = `at ${Math.round(box.x)}, ${Math.round(box.y)}, ${Math.round(
+  let where = `at ${Math.round(box.x)}, ${Math.round(box.y)}, ${Math.round(
     box.w,
   )} by ${Math.round(box.h)}`;
+
+  // In degrees, because nobody reads radians aloud. Omitted when upright rather
+  // than announcing "rotated 0 degrees" on every element on the board. Without
+  // this a turned shape reads exactly like one that was never touched — the box
+  // does not change when a shape rotates about its own centre.
+  const turn = Math.round((((item.angle || 0) * 180) / Math.PI) % 360);
+  if (turn !== 0) where += `, rotated ${turn} degrees`;
+
+  const alpha = item.opacity ?? 1;
+  if (alpha < 1) where += `, ${Math.round(alpha * 100)}% opacity`;
+
   // The words are the content. Reading out a label's dimensions and not what it
   // says would describe the box and omit the point of it.
   return item.text ? `"${item.text.replace(/\n/g, " ")}", ${where}` : where;
