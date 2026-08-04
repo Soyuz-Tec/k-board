@@ -239,5 +239,26 @@ check(
   `${engine.scene(board).find((i) => i.id === rectId).angle}`,
 );
 
+// -- the box a freehand stroke records ------------------------------------
+
+const inked = engine.exec(board, {
+  cmd: "stroke",
+  points: [
+    [10, 20],
+    [50, 5],
+    [30, 60],
+  ],
+  stroke: 0x1e1e1eff,
+  stroke_width: 2,
+});
+const drawn = engine.scene(board).find((item) => item.id === inked);
+check(
+  "a stroke records the box its path occupies",
+  drawn.x === 10 && drawn.y === 5 && drawn.w === 40 && drawn.h === 55,
+  // It used to record only x and y, leaving every consumer a zero-sized box —
+  // which is exactly the path scan the box exists to save them.
+  `${drawn.x},${drawn.y} ${drawn.w}x${drawn.h}`,
+);
+
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);
