@@ -21,3 +21,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { workspace = true }
+
+# Criterion supplies its own argument parsing, so the default libtest harness
+# has to be off or `cargo bench` cannot pass it filters and output flags.
+[[bench]]
+name = "store"
+harness = false

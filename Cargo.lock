@@ -573,6 +573,7 @@ dependencies = [
 name = "kboard-store"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "kboard-core",
  "rusqlite",
  "serde_json",
