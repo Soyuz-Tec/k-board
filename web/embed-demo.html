@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>K-board Embedded SDK demo</title>
+    <link rel="stylesheet" href="./embed-demo.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">Host application</p>
+        <h1>K-board Embedded SDK</h1>
+      </div>
+      <div class="actions" aria-label="Host controls">
+        <button id="focus" disabled>Focus board</button>
+        <button id="flush" disabled>Flush pending work</button>
+        <button id="remount" disabled>Destroy</button>
+      </div>
+    </header>
+    <p id="hostStatus" class="status" role="status" aria-live="polite">Mounting K-board…</p>
+    <main id="whiteboard" aria-label="Embedded whiteboard container"></main>
+    <script type="module" src="./embed-demo.js"></script>
+  </body>
+</html>

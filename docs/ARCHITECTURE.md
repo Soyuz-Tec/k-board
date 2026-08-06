@@ -58,10 +58,13 @@ Reviewability uses advisory thresholds rather than hard line-count gates. See
 
 ```mermaid
 flowchart LR
-  User["Board user"] --> Client["Browser or host client"]
-  Client -->|"versioned commands and presence"| Server["k-board standalone adapter"]
+  User["Board user"] --> Client["Shared browser client"]
+  Standalone["Standalone shell"] --> Client
+  Host["K-Comms or another web host"] --> SDK["Embedded SDK / k-board component"]
+  SDK --> Client
+  Client -->|"versioned commands and presence"| Server["k-board room-cell server"]
   Server -->|"operation log and snapshots"| Store["SQLite adapter"]
-  Host["Embedding platform"] -->|"C ABI"| Engine["kboard-ffi / kboard-core"]
+  NativeHost["Native embedding platform"] -->|"C ABI"| Engine["kboard-ffi / kboard-core"]
   Server --> Engine
 ```
 
@@ -117,7 +120,7 @@ flowchart TB
 | `kboard-server` transport | Protocol parsing, authentication, connection lifecycle | Mutable board state, SQL transactions |
 | `kboard-server` room cell | Scope command ordering, restore state, persistence/apply/broadcast sequence | Cross-scope mutable state |
 | `kboard-store` | Log/snapshot transactions, migrations, recovery primitives | WebSocket or presentation concerns |
-| `web` | Interaction, rendering, acknowledged outbox and reconnection UX | Server authority or durable-success inference from socket send |
+| `web` | Shared interaction/rendering, standalone bootstrap, Embedded SDK bridge, acknowledged outbox and reconnection UX | Host identity policy, server authority or durable-success inference from socket send |
 
 ## 7. Runtime views
 
@@ -171,8 +174,10 @@ Restore never falls back to an empty board when durable state may exist.
 
 ## 8. Deployment view
 
-The supported standalone unit is one `kboard-server` process plus a SQLite
-database and static web assets. Development may use in-memory storage only when
+The supported unit is one `kboard-server` process plus a SQLite database and
+static web assets. The same unit serves the standalone shell at `/`, the
+versioned embedded shell at `/embed`, and the framework-neutral SDK asset.
+Development may use in-memory storage only when
 the boot banner states that durability is disabled. Production readiness
 requires an authenticated network boundary, writable persistent volume,
 readiness checks, backup/restore evidence, and graceful drain.
@@ -235,6 +240,22 @@ credentials are usable, and bound work by connection, identity, and scope. This
 applies NIST SP 800-207 zero-trust principles without turning internal modules
 into network services.
 
+### Standalone and embedded delivery
+
+The standalone shell and Embedded SDK are product modes over one client, not
+separate editors. Standalone bootstrap owns its URL and navigation. Embedded
+bootstrap receives an opaque scope and optional scope-bound grant over a
+versioned private message channel. The host owns surrounding identity,
+navigation, and the decision to request access; the k-board server still
+enforces scope authorization, origin, durability, and resource policy.
+
+The SDK's Web Component uses a sandboxed iframe as the first independently
+deployable browser boundary. Only `/embed` may be framed, by `'self'` or exact
+origins configured in `KBOARD_EMBEDDING_ORIGINS`; the standalone page remains
+non-frameable. Cross-origin resource headers are limited to the public SDK
+module, its contract dependency, and component stylesheet. ADR-0030 defines
+lifecycle, token handling, alternatives, and revisit triggers.
+
 The reusable repository threat model is
 [`docs/security/threat-model.md`](security/threat-model.md). Public configuration,
 resource ceilings and response signals are defined in
@@ -266,7 +287,8 @@ governed by ADR-0029.
 
 Accepted and proposed decisions are indexed in [`docs/adr/`](adr/README.md).
 The room-cell transformation and governed delivery are controlled by ADR-0015
-through ADR-0029.
+through ADR-0029. Standalone and Embedded SDK delivery is controlled by
+ADR-0030.
 
 ## 11. Quality scenarios and acceptance thresholds
 
@@ -289,9 +311,8 @@ implementation is declared complete.
 - Scope mutation is isolated in bounded per-scope room-cell mailboxes, while a
   bounded single-writer queue preserves SQLite ordering. The remaining shared
   admission/directory locks protect only short metadata operations.
-- Protocol v2 now durably deduplicates and acknowledges batches, but the shipped
-  browser intentionally remains on v1 until Gate 7 supplies its ack-retained
-  persistent outbox.
+- Protocol v2 durably deduplicates and acknowledges batches, and the shipped
+  browser retains them in its IndexedDB outbox until that acknowledgement.
 - The v1 compatibility surface still uses process-local connection actors and
   cannot claim v2 replica/HLC integrity guarantees.
 - Empty operation batches remain v1 compatibility no-ops and are explicit
@@ -300,7 +321,8 @@ implementation is declared complete.
   implemented. Snapshot storage no longer holds a server-wide document lock,
   but the originating cell awaits its bounded writer result before processing
   later same-scope commands; latency SLO work remains.
-- The FFI registry lock serializes unrelated board handles.
+- The FFI registry is shared only for handle lookup; each board has its own
+  lock, so unrelated handles do not serialize through one mutation lock.
 - Schema migrations, WAL checkpoint health, storage-fault behavior and the
   tombstone horizon are explicit. Readiness and backup/restore drills remain
   later operational gates.
