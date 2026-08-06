@@ -20,6 +20,20 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 /// Largest number of operations in one batch.
 pub const MAX_OPS_PER_FRAME: usize = 512;
 
+/// One request per admitted scope connection can be pending at a time.
+pub const CELL_MAILBOX_CAPACITY: usize = 64;
+
+/// Shared SQLite writer queue. It is bounded independently of room mailboxes.
+pub const STORAGE_MAILBOX_CAPACITY: usize = 64;
+
+/// Caller wait bounds. A room command can outlive the transport caller. Storage
+/// commands may time out only while still queued; once SQLite work starts the
+/// room waits for its definitive outcome before applying, acknowledging or
+/// retrying it.
+pub const COMMAND_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
+pub const STORAGE_DEADLINE: Duration = Duration::from_secs(5);
+
 /// Sustained frames per second per connection, and the burst allowance.
 ///
 /// Two streams share this budget. The client commits a drag at most every 50ms
@@ -33,12 +47,33 @@ pub const RATE_BURST: f64 = 120.0;
 /// A few rejections are transient; a persistent flood is not.
 pub const MAX_RATE_STRIKES: u32 = 20;
 
+/// Aggregate budgets prevent many sockets from multiplying the connection
+/// budget. Values leave room for several legitimate collaborators per board.
+pub const IDENTITY_RATE_PER_SECOND: f64 = 120.0;
+pub const IDENTITY_RATE_BURST: f64 = 240.0;
+pub const SCOPE_RATE_PER_SECOND: f64 = 600.0;
+pub const SCOPE_RATE_BURST: f64 = 1_200.0;
+
+pub const MAX_CONNECTIONS: usize = 20_000;
+pub const MAX_CONNECTIONS_PER_SCOPE: usize = CELL_MAILBOX_CAPACITY;
+pub const MAX_SCOPES_PER_IDENTITY: usize = 8;
+
 /// Largest number of live elements in one room.
 pub const MAX_ELEMENTS_PER_ROOM: usize = 50_000;
+
+/// Bounds materialized state, snapshots, join serialization and simultaneous
+/// restore memory. These include tombstones.
+pub const MAX_ROOM_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SERIALIZED_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CONCURRENT_RESTORES: usize = 4;
 
 /// Largest number of rooms held concurrently. Rooms are created by URL path, so
 /// without this any visitor can mint unbounded state.
 pub const MAX_ROOMS: usize = 10_000;
+pub const MAX_RESTORING_ROOMS: usize = 32;
+pub const MAX_FAILED_ROOMS: usize = 256;
+pub const FAILED_RESTORE_RETRY: Duration = Duration::from_secs(5);
+pub const FAILED_ENTRY_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Longest accepted scope identifier.
 pub const MAX_SCOPE_BYTES: usize = 128;
@@ -61,12 +96,13 @@ pub fn scope_is_acceptable(scope: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
-/// Token bucket, one per connection.
-///
-/// Deliberately not shared across connections: a global limiter would let one
-/// abusive peer degrade everyone, which is the failure it exists to prevent.
+/// Token bucket used independently for connection, identity and scope budgets.
+/// Each layer has its own configured rate; no process-global traffic bucket lets
+/// one abusive scope consume every unrelated scope's allowance.
 #[derive(Debug)]
 pub struct RateLimiter {
+    rate_per_second: f64,
+    burst: f64,
     tokens: f64,
     last_refill: Instant,
     strikes: u32,
@@ -74,8 +110,14 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new() -> Self {
+        Self::with_budget(RATE_PER_SECOND, RATE_BURST)
+    }
+
+    pub fn with_budget(rate_per_second: f64, burst: f64) -> Self {
         Self {
-            tokens: RATE_BURST,
+            rate_per_second,
+            burst,
+            tokens: burst,
             last_refill: Instant::now(),
             strikes: 0,
         }
@@ -86,7 +128,7 @@ impl RateLimiter {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.last_refill = now;
-        self.tokens = (self.tokens + elapsed * RATE_PER_SECOND).min(RATE_BURST);
+        self.tokens = (self.tokens + elapsed * self.rate_per_second).min(self.burst);
 
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;

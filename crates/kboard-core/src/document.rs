@@ -127,6 +127,21 @@ impl Document {
         self.elements.len()
     }
 
+    /// Conservative materialized payload estimate for host resource budgets.
+    /// This includes tombstones because they consume snapshot and restore work.
+    pub fn estimated_payload_bytes(&self) -> usize {
+        self.elements.values().fold(0_usize, |document, element| {
+            element
+                .props()
+                .fold(document.saturating_add(64), |bytes, (key, value)| {
+                    bytes
+                        .saturating_add(key.estimated_bytes())
+                        .saturating_add(value.estimated_bytes())
+                        .saturating_add(32)
+                })
+        })
+    }
+
     /// Highest stamp anywhere in the document.
     pub fn max_stamp(&self) -> Option<Hlc> {
         self.elements.values().filter_map(Element::max_stamp).max()
@@ -162,8 +177,15 @@ impl Document {
             match self.elements.get_mut(id) {
                 Some(current) => changed |= current.merge(incoming),
                 None => {
-                    self.elements.insert(*id, incoming.clone());
-                    changed = true;
+                    // Route even a whole incoming element through the same
+                    // validation as an existing one. Deserialised peer state
+                    // is a trust-boundary input, not permission to bypass the
+                    // property contract.
+                    let mut validated = Element::new(*id);
+                    if validated.merge(incoming) {
+                        self.elements.insert(*id, validated);
+                        changed = true;
+                    }
                 }
             }
         }

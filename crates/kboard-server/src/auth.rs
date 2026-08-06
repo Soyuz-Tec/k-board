@@ -56,6 +56,19 @@ pub enum Denied {
     WrongScope,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    expires_at: Option<u64>,
+}
+
+impl Grant {
+    pub fn remaining(&self) -> Option<std::time::Duration> {
+        self.expires_at.map(|expires_at| {
+            std::time::Duration::from_secs(expires_at.saturating_sub(now_seconds()))
+        })
+    }
+}
+
 pub struct Authority {
     secret: Option<Vec<u8>>,
 }
@@ -119,9 +132,9 @@ impl Authority {
     /// # Errors
     ///
     /// A [`Denied`] reason, for logging only. Callers must not relay it.
-    pub fn verify(&self, token: Option<&str>, scope: &str) -> Result<(), Denied> {
+    pub fn verify(&self, token: Option<&str>, scope: &str) -> Result<Grant, Denied> {
         let Some(secret) = self.secret.as_ref() else {
-            return Ok(());
+            return Ok(Grant { expires_at: None });
         };
         let token = token.ok_or(Denied::Missing)?;
         let (encoded, signature) = token.split_once('.').ok_or(Denied::Malformed)?;
@@ -149,7 +162,9 @@ impl Authority {
         if claims.scope != scope {
             return Err(Denied::WrongScope);
         }
-        Ok(())
+        Ok(Grant {
+            expires_at: Some(claims.exp),
+        })
     }
 }
 
@@ -183,7 +198,7 @@ mod tests {
         let token = authority
             .mint("tenant-a:board", DEFAULT_TTL_SECONDS)
             .unwrap();
-        assert_eq!(authority.verify(Some(&token), "tenant-a:board"), Ok(()));
+        assert!(authority.verify(Some(&token), "tenant-a:board").is_ok());
     }
 
     #[test]
@@ -251,7 +266,7 @@ mod tests {
     fn an_open_authority_admits_everyone_and_mints_nothing() {
         let authority = Authority::open();
         assert!(!authority.is_enforcing());
-        assert_eq!(authority.verify(None, "t:b"), Ok(()));
+        assert!(authority.verify(None, "t:b").is_ok());
         // Handing back a token an open server ignores would invite someone to
         // believe it protects them.
         assert!(authority.mint("t:b", DEFAULT_TTL_SECONDS).is_none());

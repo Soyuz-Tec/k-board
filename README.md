@@ -4,9 +4,10 @@ A multi-tenant collaborative canvas engine, built to work equally well as its
 own product and as a component inside someone else's platform.
 
 **Status: working, early.** You can run it, draw in it, and watch two tabs
-converge. The renderer is Canvas 2D rather than GPU, storage is in memory, and
-the standalone deployment has no authentication yet. See
-[Roadmap](#roadmap) for exactly what exists.
+converge. The renderer is Canvas 2D rather than GPU; SQLite durability and
+scoped bearer authentication are available, while loopback development may
+still run in memory without authentication. See [Roadmap](#roadmap) for exactly
+what exists.
 
 ---
 
@@ -25,7 +26,9 @@ To run it anywhere other than loopback, authentication is required:
 ```bash
 export KBOARD_SECRET="something long and random"
 cargo run -p kboard-server -- --token my-board   # prints a grant
-KBOARD_BIND=0.0.0.0 cargo run -p kboard-server
+KBOARD_BIND=0.0.0.0 \
+KBOARD_ALLOWED_ORIGINS=https://board.example.com \
+cargo run -p kboard-server
 ```
 
 Then open `/?token=<grant>`. A grant opens one scope and expires; it travels as
@@ -90,6 +93,15 @@ never parses that identifier — it only compares it.
 
 ## Architecture
 
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the architecture source of
+truth. The dependency, runtime, deployment, quality and risk views there govern
+the ordered room-cell transformation.
+
+Public deployment policy, enforced limits and incident signals are documented
+in [`docs/security/deployment-and-incidents.md`](docs/security/deployment-and-incidents.md);
+the repository threat model is
+[`docs/security/threat-model.md`](docs/security/threat-model.md).
+
 ```
 crates/kboard-core     safe, forbid(unsafe_code) — the convergent document model
 crates/kboard-ffi      the only unsafe code — C ABI, panic-trapped at every export
@@ -122,9 +134,12 @@ is recovered from rather than propagated.
 ## Verification
 
 ```bash
-cargo test --workspace          # 75 tests
+node scripts/architecture-check.mjs
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 node scripts/two-replica-check.mjs   # against a running server
+node scripts/protocol-v2-check.mjs    # negotiated ack/identity/mixed-version contract
+node scripts/storage-health-check.mjs # schema/WAL/writer operational contract
 ```
 
 These are laws, not samples. A CRDT that converges only for the orderings you
@@ -141,6 +156,8 @@ happened to try is not a CRDT.
 | Tenant isolation | Cross-scope merge is refused and does not partially apply |
 | Wire stability | Documents and op logs round-trip through JSON, including custom keys |
 | End to end | Two live replicas over WebSocket converge with both concurrent edits intact |
+| Durable delivery | Protocol v2 ack loss, duplicate retry, actor forgery, clock skew and v1/v2 overlap are exercised live |
+| Exact recovery | Migrations, snapshot/log races, corrupt snapshots, retention and busy/read-only/full storage faults are deterministic tests |
 | Refusal atomicity | An over-limit batch is rejected whole and never partially applied |
 | Abuse resistance | Scope charset rejects traversal and injection; rate limiter throttles bursts and disconnects floods |
 
@@ -162,10 +179,11 @@ pixels to be painting for content to be readable.
 - Snapshot compaction and tombstone collection
 - Authority ports; tenant scope isolation
 - C ABI with panic trapping; wasm32 and native from one crate
-- WebSocket sync server with per-room compacting log
+- WebSocket sync server with one bounded ordered room cell per active scope
 - Browser client: shapes, freehand, select/move, erase, pan, zoom, colours,
   text, undo/redo with Ctrl+Z / Ctrl+Shift+Z
-- Local-first queueing — draw offline, reconnect, replay
+- IndexedDB outbox — retain stable batch/replica identity through offline work,
+  reload, reconnect, durable acknowledgement and recovery export
 - DOM accessibility mirror
 - Server hardening: rate limiting, frame/batch caps, room bounds, idle
   reclamation, scope validation, security headers
@@ -175,6 +193,9 @@ pixels to be painting for content to be readable.
 - Dependency policy via `cargo-deny` — licences, duplicates, and sources
 - Durable persistence: SQLite behind the engine's `OpLog`/`SnapshotStore`
   ports, with boards restored on join ([ADR-0007](docs/adr/0007-sqlite-durable-storage.md))
+- Negotiated protocol v2 with stable scope-bound replica actors, idempotent
+  batch append, durable sequence acknowledgements and typed refusals; v1 stays
+  available during the documented compatibility window
 - Undo/redo, per actor, as fresh writes of prior values — so a reversal
   converges like any other edit and reaches collaborators
 - Per-scope bearer authentication, enforced on the WebSocket handshake, with a
@@ -194,6 +215,8 @@ pixels to be painting for content to be readable.
   is drawn next — each control sending only what it changed
 - CI: fmt, clippy, tests, MSRV, wasm build, convergence proofs, e2e, audit,
   dependency policy, benchmark compilation
+- Separate liveness/readiness/diagnostics, bounded process drain, verified
+  online SQLite backup and isolated restore drills
 
 **Next**
 - Rustler binding so a BEAM host can call `merge`, `snapshot`, `validate`
@@ -230,6 +253,11 @@ elements per room, room count, scope charset and length, and idle-room
 reclamation. See [ADR-0006](docs/adr/0006-server-resource-limits.md) for the
 values and why each exists. That closes the denial-of-service routes; it does
 not substitute for authentication.
+
+Production lifecycle commands, probes, alerts, capacity and recovery objectives
+are in [`docs/operations/production-lifecycle.md`](docs/operations/production-lifecycle.md).
+The supported topology is one authoritative server process; ADR-0028 explains
+why a second writer requires leased scope ownership and storage fencing first.
 
 ## Decisions
 

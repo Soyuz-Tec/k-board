@@ -1,0 +1,8 @@
+{
+  "type": "init",
+  "actor": 1,
+  "doc": {
+    "scope": "fixture",
+    "elements": {}
+  }
+}

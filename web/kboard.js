@@ -18,7 +18,7 @@ export const STATUS = Object.freeze({
   REFUSED: 4,
 });
 
-const EXPECTED_ABI = 2;
+const EXPECTED_ABI = 3;
 
 export class EngineError extends Error {
   constructor(operation, status) {
@@ -86,8 +86,11 @@ export class Engine {
 
   /** Open a board. The host decides who may do this; the engine does not. */
   open(scope, actor) {
+    if (!Number.isSafeInteger(actor) || actor <= 0) {
+      throw new Error("k-board: actor must be a positive safe integer");
+    }
     const handle = this.#withText(scope, (pointer, length) =>
-      this.#exports.kb_open(pointer, length, actor >>> 0),
+      this.#exports.kb_open(pointer, length, BigInt(actor)),
     );
     if (handle === 0) throw new Error("k-board: could not open board");
     return handle;

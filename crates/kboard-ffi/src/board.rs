@@ -639,10 +639,27 @@ impl Board {
     /// [`MergeError::ScopeMismatch`] if the incoming document belongs to a
     /// different tenant.
     pub fn merge_document(&mut self, incoming: &Document) -> Result<bool, MergeError> {
+        if incoming.scope() != self.document.scope() {
+            return Err(MergeError::ScopeMismatch {
+                expected: self.document.scope().clone(),
+                found: incoming.scope().clone(),
+            });
+        }
+
+        let actor = self.clock.actor();
+        let highest_local = incoming
+            .all()
+            .map(|element| element.id())
+            .filter(|id| id.actor() == actor)
+            .map(ElementId::local_counter)
+            .max()
+            .unwrap_or(0);
         if let Some(highest) = incoming.max_stamp() {
             self.clock.observe(highest, highest.wall);
         }
-        self.document.merge(incoming)
+        let changed = self.document.merge(incoming)?;
+        self.next_local = self.next_local.max(highest_local);
+        Ok(changed)
     }
 
     /// Drain the operations this replica has produced but not yet sent.
@@ -1274,6 +1291,52 @@ mod tests {
         let item = &alice.scene()[0];
         assert_eq!(item.x, 99.0, "the move survived");
         assert_eq!(item.stroke, 0xABCDEF00, "the restyle survived");
+    }
+
+    #[test]
+    fn reload_advances_the_actor_local_element_counter() {
+        let actor = 9_007_199_254_740_001;
+        let mut before = Board::open("t/b", actor);
+        let first = before
+            .exec(
+                &Command::Add {
+                    kind: "rectangle".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
+                    stroke: 0,
+                    fill: 0,
+                    stroke_width: 1.0,
+                },
+                1_000,
+            )
+            .unwrap()
+            .unwrap();
+
+        let mut after = Board::open("t/b", actor);
+        after.merge_document(before.document()).unwrap();
+        let second = after
+            .exec(
+                &Command::Add {
+                    kind: "rectangle".into(),
+                    x: 20.0,
+                    y: 20.0,
+                    w: 10.0,
+                    h: 10.0,
+                    stroke: 0,
+                    fill: 0,
+                    stroke_width: 1.0,
+                },
+                2_000,
+            )
+            .unwrap()
+            .unwrap();
+        let second = ElementId::from_hex(&second).unwrap();
+
+        assert_ne!(ElementId::from_hex(&first).unwrap(), second);
+        assert_eq!(second.actor(), ActorId(actor));
+        assert_eq!(second.local_counter(), 2);
     }
 
     #[test]

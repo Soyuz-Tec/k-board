@@ -27,7 +27,7 @@ use kboard_core::frac;
 use kboard_core::op::{upsert, StampedOp};
 use kboard_core::ports::{OpLog, SnapshotStore};
 use kboard_core::prop::{ElementKind, PropKey, PropValue};
-use kboard_core::snapshot::Snapshot;
+use kboard_core::snapshot::{CapturedSnapshot, Snapshot};
 use kboard_store::SqliteStore;
 
 const SIZES: [u128; 3] = [100, 1_000, 10_000];
@@ -108,12 +108,15 @@ fn bench_snapshot(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("store/snapshot");
 
     for size in SIZES {
-        let snapshot = snapshot_of(size);
+        let operations = shape_ops(1, size);
+        let snapshot = Snapshot::materialize(scope(), &operations);
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bencher, _| {
             let (_guard, mut store) = on_disk();
+            let through = store.append(&scope(), &operations).expect("append");
+            let captured = CapturedSnapshot::new(snapshot.clone(), through);
             bencher.iter(|| {
-                store.store(&scope(), black_box(&snapshot)).expect("store");
+                store.store(black_box(&captured)).expect("store");
             });
         });
     }
@@ -132,7 +135,11 @@ fn bench_restore(criterion: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bencher, _| {
             let (_guard, mut store) = on_disk();
-            store.store(&scope(), &snapshot_of(size)).expect("store");
+            let operations = shape_ops(1, size);
+            let through = store.append(&scope(), &operations).expect("append");
+            store
+                .store(&CapturedSnapshot::new(snapshot_of(size), through))
+                .expect("store");
             // A hundred operations since the snapshot: the snapshot interval is
             // 200, so this is a board caught mid-interval, which is the usual
             // case rather than the lucky one.

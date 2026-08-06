@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::clock::ActorId;
 use crate::clock::Hlc;
 use crate::lww::Lww;
 use crate::prop::{ElementKind, Point, PropKey, PropValue};
@@ -36,6 +37,16 @@ impl ElementId {
         u128::from_str_radix(text.trim_start_matches("0x"), 16)
             .ok()
             .map(Self)
+    }
+
+    /// Actor that originally minted this id.
+    pub const fn actor(self) -> ActorId {
+        ActorId((self.0 >> 64) as u64)
+    }
+
+    /// Actor-local monotonic portion of this id.
+    pub const fn local_counter(self) -> u64 {
+        self.0 as u64
     }
 }
 
@@ -80,7 +91,7 @@ impl Element {
     /// outcomes, not errors: a stale write losing is the convergent result, and
     /// rejecting NaN keeps it out of every downstream replica.
     pub fn set(&mut self, key: PropKey, value: PropValue, stamp: Hlc) -> bool {
-        if !value.is_valid() {
+        if !value.is_valid_for(&key) {
             return false;
         }
         match self.props.get_mut(&key) {
@@ -100,6 +111,9 @@ impl Element {
     pub fn merge(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for (key, incoming) in &other.props {
+            if !incoming.get().is_valid_for(key) {
+                continue;
+            }
             match self.props.get_mut(key) {
                 Some(current) => changed |= current.merge(incoming),
                 None => {
@@ -260,6 +274,35 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_known_property_values_never_dominate_valid_ones() {
+        let mut element = Element::new(ElementId(1));
+        assert!(element.set(PropKey::Deleted, PropValue::Bool(true), stamp(1, A)));
+        assert!(!element.set(
+            PropKey::Deleted,
+            PropValue::Text("false".into()),
+            stamp(2, B)
+        ));
+        assert!(element.is_deleted());
+    }
+
+    #[test]
+    fn merge_ignores_an_incompatible_future_value() {
+        let mut valid = Element::new(ElementId(1));
+        valid.props.insert(
+            PropKey::Deleted,
+            Lww::new(PropValue::Bool(true), stamp(1, A)),
+        );
+        let mut malformed = Element::new(ElementId(1));
+        malformed.props.insert(
+            PropKey::Deleted,
+            Lww::new(PropValue::Text("false".into()), stamp(2, B)),
+        );
+
+        assert!(!valid.merge(&malformed));
+        assert!(valid.is_deleted());
+    }
+
+    #[test]
     fn stale_writes_are_dropped() {
         let mut element = Element::new(ElementId(1));
         element.set(PropKey::X, PropValue::Num(100.0), stamp(10, A));
@@ -272,6 +315,13 @@ mod tests {
         let id = ElementId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         assert_eq!(ElementId::from_hex(&id.to_hex()), Some(id));
         assert_eq!(id.to_hex().len(), 32);
+    }
+
+    #[test]
+    fn element_id_exposes_its_actor_and_local_counter() {
+        let id = ElementId((u128::from(9_u64) << 64) | 42);
+        assert_eq!(id.actor(), ActorId(9));
+        assert_eq!(id.local_counter(), 42);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::fmt;
 use crate::clock::ActorId;
 use crate::document::ScopeId;
 use crate::op::StampedOp;
-use crate::snapshot::Snapshot;
+use crate::snapshot::CapturedSnapshot;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PortError {
@@ -77,8 +77,10 @@ pub trait OpLog {
 
 /// Materialised-document storage, so joining is not O(history).
 pub trait SnapshotStore {
-    fn load(&self, scope: &ScopeId) -> Result<Option<Snapshot>, PortError>;
-    fn store(&mut self, scope: &ScopeId, snapshot: &Snapshot) -> Result<(), PortError>;
+    fn load(&self, scope: &ScopeId) -> Result<Option<CapturedSnapshot>, PortError>;
+    /// Commit the captured document and coverage, atomically removing covered
+    /// log rows. Returns the number of rows truncated.
+    fn store(&mut self, snapshot: &CapturedSnapshot) -> Result<u64, PortError>;
 }
 
 /// In-memory port implementations for tests.
@@ -90,7 +92,7 @@ pub mod memory {
     use crate::clock::ActorId;
     use crate::document::ScopeId;
     use crate::op::StampedOp;
-    use crate::snapshot::Snapshot;
+    use crate::snapshot::CapturedSnapshot;
 
     /// A clock that never moves. Makes stamp ordering depend only on the
     /// logical counter, which is the harshest case for convergence.
@@ -202,20 +204,18 @@ pub mod memory {
 
     #[derive(Clone, Debug, Default)]
     pub struct MemorySnapshots {
-        stored: BTreeMap<ScopeId, Snapshot>,
+        stored: BTreeMap<ScopeId, CapturedSnapshot>,
     }
 
     impl SnapshotStore for MemorySnapshots {
-        fn load(&self, scope: &ScopeId) -> Result<Option<Snapshot>, PortError> {
+        fn load(&self, scope: &ScopeId) -> Result<Option<CapturedSnapshot>, PortError> {
             Ok(self.stored.get(scope).cloned())
         }
 
-        fn store(&mut self, scope: &ScopeId, snapshot: &Snapshot) -> Result<(), PortError> {
-            if snapshot.scope() != scope {
-                return Err(PortError::Backend("snapshot scope mismatch".into()));
-            }
-            self.stored.insert(scope.clone(), snapshot.clone());
-            Ok(())
+        fn store(&mut self, snapshot: &CapturedSnapshot) -> Result<u64, PortError> {
+            self.stored
+                .insert(snapshot.scope().clone(), snapshot.clone());
+            Ok(0)
         }
     }
 }
@@ -291,10 +291,11 @@ mod tests {
 
     #[test]
     fn snapshot_store_rejects_a_mismatched_scope() {
-        use crate::snapshot::Snapshot;
+        use crate::snapshot::{CapturedSnapshot, Snapshot};
         let mut store = MemorySnapshots::default();
-        let snapshot = Snapshot::empty(ScopeId::new("tenant-a/b"));
-        assert!(store.store(&ScopeId::new("tenant-b/b"), &snapshot).is_err());
+        let snapshot = CapturedSnapshot::new(Snapshot::empty(ScopeId::new("tenant-a/b")), 0);
+        store.store(&snapshot).unwrap();
+        assert!(store.load(&ScopeId::new("tenant-b/b")).unwrap().is_none());
     }
 
     #[test]
