@@ -206,8 +206,9 @@ pixels to be painting for content to be readable.
 - Authority ports; tenant scope isolation
 - C ABI with panic trapping; wasm32 and native from one crate
 - WebSocket sync server with one bounded ordered room cell per active scope
-- Browser client: shapes, freehand, select/move, erase, pan, zoom, colours,
-  text, undo/redo with Ctrl+Z / Ctrl+Shift+Z
+- Browser client: shapes, endpoint lines, arrows, sticky notes, freehand,
+  select/move, erase, pan, wheel and visible zoom/fit controls, colours, text,
+  undo/redo with Ctrl+Z / Ctrl+Shift+Z
 - IndexedDB outbox — retain stable batch/replica identity through offline work,
   reload, reconnect, durable acknowledgement and recovery export
 - DOM accessibility mirror

@@ -39,6 +39,8 @@ export function serialise(items) {
       stroke: item.stroke,
       fill: item.fill,
       stroke_width: item.stroke_width,
+      ...(item.role ? { role: item.role } : {}),
+      ...(item.role === "sticky" && item.opacity != null ? { opacity: item.opacity } : {}),
       ...(item.points ? { points: item.points } : {}),
       ...(item.text != null ? { text: item.text, font_size: item.font_size } : {}),
     })),
@@ -122,6 +124,21 @@ export function place(elements, at) {
  * it converges, replicates, and undoes without any special case anywhere.
  */
 export function toCommand(element) {
+  if (element.role === "sticky") {
+    return {
+      cmd: "sticky",
+      x: element.x,
+      y: element.y,
+      w: element.w,
+      h: element.h,
+      text: element.text ?? "",
+      font_size: element.font_size ?? 20,
+      stroke: element.stroke ?? 0,
+      fill: element.fill ?? 0xffec99ff,
+      stroke_width: element.stroke_width ?? 2,
+      opacity: element.opacity ?? 1,
+    };
+  }
   if (element.kind === "text") {
     return {
       cmd: "text",

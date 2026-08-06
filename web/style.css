@@ -289,6 +289,66 @@ canvas.select-mode {
   transform-origin: top left;
 }
 
+#editor.sticky-editor {
+  padding: 16px;
+  border: 1px solid var(--sticky-stroke, #f08c00);
+  border-radius: 3px;
+  outline: 2px solid var(--accent);
+  background: var(--sticky-fill, #ffec99);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.zoom-controls {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+
+.zoom-controls button {
+  min-width: 38px;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.zoom-controls button:last-child {
+  border-right: 0;
+}
+
+.zoom-controls button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.zoom-controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.zoom-controls .zoom-value {
+  min-width: 62px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.zoom-controls .zoom-fit {
+  font-size: 12px;
+}
+
 /* Focusable for keyboard selection, so the focus has to be visible. */
 canvas:focus-visible {
   outline: 2px solid var(--accent);

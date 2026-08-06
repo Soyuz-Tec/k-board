@@ -433,10 +433,10 @@ async fn shutdown(directory: ScopeDirectory, storage: StorageWriter, accepting: 
 /// The standalone shell is never frameable. Only the explicit embedded shell
 /// uses the configured exact frame-ancestor policy.
 async fn security_headers(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let path = request.uri().path();
+    let path = request.uri().path().to_owned();
     let embedded_shell = path == "/embed";
     let public_embed_asset = matches!(
-        path,
+        path.as_str(),
         "/embed-sdk.js" | "/embed-contract.mjs" | "/embed-element.css"
     );
     let mut response = next.run(request).await;
@@ -452,6 +452,12 @@ async fn security_headers(State(state): State<AppState>, request: Request, next:
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    if is_unversioned_web_asset(&path) {
+        // These assets refer to one another by stable names. Revalidation keeps
+        // a deployment from combining a new app module with an older cached
+        // renderer or wasm engine from a previous release.
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
     if public_embed_asset {
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -482,6 +488,13 @@ async fn security_headers(State(state): State<AppState>, request: Request, next:
         HeaderValue::from_str(&policy).expect("validated origins produce a valid CSP"),
     );
     response
+}
+
+fn is_unversioned_web_asset(path: &str) -> bool {
+    matches!(path, "/" | "/embed" | "/kboard.wasm")
+        || [".html", ".js", ".mjs", ".css"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
 }
 
 async fn serve_wasm(State(state): State<AppState>) -> Response {
@@ -1228,5 +1241,23 @@ mod operational_tests {
             readiness_reasons(true, &directory, None),
             ["storage_unavailable"]
         );
+    }
+
+    #[test]
+    fn unversioned_web_assets_revalidate_as_one_release() {
+        for path in [
+            "/",
+            "/embed",
+            "/app.js",
+            "/scene.js",
+            "/embed-contract.mjs",
+            "/style.css",
+            "/kboard.wasm",
+        ] {
+            assert!(is_unversioned_web_asset(path), "{path}");
+        }
+        for path in ["/health", "/api/storage/health", "/ws/a"] {
+            assert!(!is_unversioned_web_asset(path), "{path}");
+        }
     }
 }

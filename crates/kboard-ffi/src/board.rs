@@ -57,6 +57,28 @@ pub enum Command {
         #[serde(default)]
         stroke: u32,
     },
+    /// Create one role-bearing sticky note.
+    ///
+    /// The document stores this as a rectangle plus a namespaced role rather
+    /// than a new element-kind enum value. Older replicas can therefore retain
+    /// and render the surface instead of rejecting an unknown kind.
+    Sticky {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        text: String,
+        #[serde(default = "default_font_size")]
+        font_size: f64,
+        #[serde(default)]
+        stroke: u32,
+        #[serde(default = "default_sticky_fill")]
+        fill: u32,
+        #[serde(default = "default_stroke_width")]
+        stroke_width: f64,
+        #[serde(default = "default_opacity")]
+        opacity: f64,
+    },
     /// Replace the content of an existing text element, and the box the host
     /// measured for it.
     SetText {
@@ -122,9 +144,19 @@ const fn default_stroke_width() -> f64 {
 
 const DEFAULT_FONT_SIZE: f64 = 20.0;
 const DEFAULT_OPACITY: f64 = 1.0;
+const STICKY_ROLE_KEY: &str = "kboard.role";
+const STICKY_ROLE: &str = "sticky";
 
 const fn default_font_size() -> f64 {
     DEFAULT_FONT_SIZE
+}
+
+const fn default_sticky_fill() -> u32 {
+    0xffec_99ff
+}
+
+const fn default_opacity() -> f64 {
+    DEFAULT_OPACITY
 }
 
 /// What a reader sees when a property was never written.
@@ -152,6 +184,9 @@ fn read_default(key: &PropKey) -> Option<PropValue> {
 pub struct SceneItem {
     pub id: String,
     pub kind: String,
+    /// Optional semantic refinement that remains compatible with older kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -453,6 +488,44 @@ impl Board {
                 Ok(Some(id.to_hex()))
             }
 
+            Command::Sticky {
+                x,
+                y,
+                w,
+                h,
+                text,
+                font_size,
+                stroke,
+                fill,
+                stroke_width,
+                opacity,
+            } => {
+                let text = validate_text(text)?;
+                let id = self.mint_id();
+                let z = self.document.z_index_for_top();
+                let props = vec![
+                    (PropKey::Kind, PropValue::Kind(ElementKind::Rectangle)),
+                    (
+                        PropKey::Custom(STICKY_ROLE_KEY.to_owned()),
+                        PropValue::Text(STICKY_ROLE.to_owned()),
+                    ),
+                    (PropKey::X, PropValue::Num(*x)),
+                    (PropKey::Y, PropValue::Num(*y)),
+                    (PropKey::Width, PropValue::Num(*w)),
+                    (PropKey::Height, PropValue::Num(*h)),
+                    (PropKey::Text, PropValue::Text(text)),
+                    (PropKey::FontSize, PropValue::Num(*font_size)),
+                    (PropKey::Stroke, PropValue::Color(*stroke)),
+                    (PropKey::Fill, PropValue::Color(*fill)),
+                    (PropKey::StrokeWidth, PropValue::Num(*stroke_width)),
+                    (PropKey::Opacity, PropValue::Num(opacity.clamp(0.0, 1.0))),
+                    (PropKey::ZIndex, PropValue::Text(z)),
+                ];
+                let ops = op::upsert(id, props.clone(), &mut self.clock, now_ms);
+                self.record_change(ops, creation(id, props));
+                Ok(Some(id.to_hex()))
+            }
+
             Command::SetText { id, text, w, h } => {
                 let text = validate_text(text)?;
                 let element = self.require(id)?;
@@ -675,6 +748,10 @@ impl Board {
             .map(|element| SceneItem {
                 id: element.id().to_hex(),
                 kind: element.kind().map_or("rectangle", kind_name).to_owned(),
+                role: match element.get(&PropKey::Custom(STICKY_ROLE_KEY.to_owned())) {
+                    Some(PropValue::Text(role)) => Some(role.clone()),
+                    _ => None,
+                },
                 x: element.x(),
                 y: element.y(),
                 w: element.width(),
@@ -1111,6 +1188,43 @@ mod tests {
         assert_eq!(item.text.as_deref(), Some("hello"));
         assert_eq!(item.font_size, 20.0);
         assert_eq!(item.w, 120.0);
+    }
+
+    #[test]
+    fn sticky_is_one_role_bearing_undoable_element() {
+        let mut board = Board::open("t/b", 1);
+        let id = board
+            .exec(
+                &Command::Sticky {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 180.0,
+                    h: 120.0,
+                    text: "Plan the launch".into(),
+                    font_size: 20.0,
+                    stroke: 0x1e1e_1eff,
+                    fill: 0xffec_99ff,
+                    stroke_width: 2.0,
+                    opacity: 0.8,
+                },
+                1_000,
+            )
+            .unwrap()
+            .unwrap();
+
+        let item = board
+            .scene()
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert_eq!(item.kind, "rectangle");
+        assert_eq!(item.role.as_deref(), Some("sticky"));
+        assert_eq!(item.text.as_deref(), Some("Plan the launch"));
+        assert_eq!(item.fill, 0xffec_99ff);
+        assert_eq!(item.opacity, 0.8);
+
+        assert!(board.undo(2_000));
+        assert!(board.scene().is_empty(), "the note must undo as one action");
     }
 
     #[test]
