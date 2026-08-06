@@ -364,7 +364,7 @@ overload; any scale-out now requires leased ownership and durable fencing.
 - [x] **G11-12** Review operational dashboards and alert playbooks.
 - [x] **G11-13** Record unresolved risks with owners and revisit triggers.
 - [x] **G11-14** Prepare rollback and data-compatibility plan.
-- [ ] **G11-15** Use a focused PR with architecture, risk and evidence summary.
+- [x] **G11-15** Use a focused PR with architecture, risk and evidence summary.
 - [ ] **G11-16** Require architecture/security ownership review.
 - [ ] **G11-17** Merge only with protected checks passing.
 - [ ] **G11-18** Validate the immutable artifact in the target environment.
@@ -391,7 +391,7 @@ code exists; name its evidence.
 | 8A — isolation and observability | G8-01..G8-20 | Complete | ADR-0026, per-board lock/race tests, fixed-cardinality phase telemetry, native/wasm benchmarks and eight-scope SLO evidence |
 | 9A — production lifecycle | G9-01..G9-20 | Complete | ADR-0027, readiness/drain/storage tests, scheduled backup/restore drill and recorded RPO 0 / 154.53 ms RTO game day |
 | 10A — topology and scale | G10-01..G10-12 | Complete | ADR-0028 ATAM; 64 writing scopes qualified, 96 bounded-overload trigger; lease/fencing requirements recorded before scale-out |
-| 11A — local qualification and delivery controls | G11-01..05, G11-07, G11-09..14 | Partial (12/20) | Full workspace/build targets, live protocol/restart/auth/recovery and 64-scope workload pass; ADR-0029, dashboard contract and release qualification record; browser reload, security, PR/merge/review and target evidence remain open |
+| 11A — local qualification and governed draft | G11-01..05, G11-07, G11-09..15 | Partial (13/20) | Full workspace/build targets, live protocol/restart/auth/recovery and 64-scope workload pass; ADR-0029, dashboard contract, release record and draft PR #14; browser reload, security, independent review/protected merge and target evidence remain open |
 
 ## Definition of done
 

@@ -18,6 +18,7 @@ for another.
 
 ## Governed delivery
 
+- Draft pull request: <https://github.com/Soyuz-Tec/k-board/pull/14>.
 - CI produces `k-board-<commit>` and its `SHA256SUMS`, verifies the manifest,
   starts the packaged server and uploads the exact bundle.
 - The pull request records architecture impact, review-size exceptions,
