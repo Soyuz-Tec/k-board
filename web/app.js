@@ -10,6 +10,7 @@
 import { loadEngine } from "./kboard.js";
 import {
   LINE_HEIGHT,
+  STICKY_PADDING,
   bounds,
   drawShape,
   fontFor,
@@ -17,10 +18,11 @@ import {
   pack,
   sceneBounds,
   toSvg,
-} from "./scene.js";
+  unpack,
+} from "./scene.js?v=1";
 import * as transform from "./transform.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
-import * as clipboard from "./clipboard.js";
+import * as clipboard from "./clipboard.js?v=1";
 import { OutboxLimitError, createClientOutbox } from "./outbox.js";
 import { resolveRuntimeConfiguration } from "./runtime-config.js";
 
@@ -41,8 +43,14 @@ const pngButton = document.getElementById("exportPng");
 const svgButton = document.getElementById("exportSvg");
 const recoveryButton = document.getElementById("exportRecovery");
 const openStandaloneButton = document.getElementById("openStandalone");
+const zoomOutButton = document.getElementById("zoomOut");
+const zoomResetButton = document.getElementById("zoomReset");
+const zoomInButton = document.getElementById("zoomIn");
+const zoomFitButton = document.getElementById("zoomFit");
 
 const COMMIT_INTERVAL_MS = 50; // live-drag update rate sent to peers
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 6;
 
 const state = {
   engine: null,
@@ -176,6 +184,9 @@ function toScene(clientX, clientY) {
 // -- text ------------------------------------------------------------------
 
 const DEFAULT_FONT_SIZE = 20;
+const STICKY_MIN_WIDTH = 180;
+const STICKY_MIN_HEIGHT = 120;
+const STICKY_DEFAULT_FILL = "#ffec99";
 
 /**
  * Measure a label with the canvas that will draw it.
@@ -202,14 +213,50 @@ function measureText(text, size) {
  * conventions with it. Reimplementing any of those on a canvas would be worse
  * in every case and wrong in most of them.
  */
-function beginTextEdit({ id = null, x, y, text = "", size = DEFAULT_FONT_SIZE }) {
-  state.editing = { id, x, y, size };
+function beginTextEdit({
+  id = null,
+  x,
+  y,
+  w = 0,
+  h = 0,
+  text = "",
+  size = DEFAULT_FONT_SIZE,
+  role = null,
+  stroke = null,
+  fill = null,
+  stroke_width = 2,
+  opacity = 1,
+}) {
+  const sticky = role === "sticky";
+  const editingStroke = stroke ?? pack(state.colour);
+  const editingFill = fill ?? pack(state.fill === "none" ? STICKY_DEFAULT_FILL : state.fill);
+  state.editing = {
+    id,
+    x,
+    y,
+    w,
+    h,
+    size,
+    role,
+    stroke: editingStroke,
+    fill: editingFill,
+    stroke_width,
+    opacity,
+  };
   editor.value = text;
   editor.style.font = fontFor(size * state.view.scale);
   editor.style.lineHeight = String(LINE_HEIGHT);
   editor.style.left = `${x * state.view.scale + state.view.x}px`;
   editor.style.top = `${y * state.view.scale + state.view.y}px`;
-  editor.style.color = state.colour;
+  editor.style.color = unpack(editingStroke);
+  editor.classList.toggle("sticky-editor", sticky);
+  if (sticky) {
+    editor.style.setProperty("--sticky-fill", unpack(editingFill));
+    editor.style.setProperty("--sticky-stroke", unpack(editingStroke));
+  } else {
+    editor.style.removeProperty("--sticky-fill");
+    editor.style.removeProperty("--sticky-stroke");
+  }
   editor.hidden = false;
   fitEditor();
   editor.focus();
@@ -223,8 +270,28 @@ function beginTextEdit({ id = null, x, y, text = "", size = DEFAULT_FONT_SIZE })
 function fitEditor() {
   const size = state.editing.size * state.view.scale;
   const { w, h } = measureText(editor.value || " ", size);
-  editor.style.width = `${w + size}px`;
-  editor.style.height = `${h}px`;
+  if (state.editing.role === "sticky") {
+    const padding = STICKY_PADDING * state.view.scale;
+    editor.style.width = `${Math.max(state.editing.w * state.view.scale, w + padding * 2, STICKY_MIN_WIDTH * state.view.scale)}px`;
+    editor.style.height = `${Math.max(state.editing.h * state.view.scale, h + padding * 2, STICKY_MIN_HEIGHT * state.view.scale)}px`;
+  } else {
+    editor.style.width = `${w + size}px`;
+    editor.style.height = `${h}px`;
+  }
+}
+
+function editTextItem(item) {
+  beginTextEdit({
+    id: item.id,
+    ...bounds(item),
+    text: item.text,
+    size: item.font_size,
+    role: item.role,
+    stroke: item.stroke,
+    fill: item.fill,
+    stroke_width: item.stroke_width,
+    opacity: item.opacity,
+  });
 }
 
 /**
@@ -244,11 +311,33 @@ function endTextEdit() {
   canvas.focus();
 
   if (state.board !== null) {
-    const { w, h } = measureText(text, editing.size);
+    const measured = measureText(text, editing.size);
+    const sticky = editing.role === "sticky";
+    const w = sticky
+      ? Math.max(editing.w, measured.w + STICKY_PADDING * 2, STICKY_MIN_WIDTH)
+      : measured.w;
+    const h = sticky
+      ? Math.max(editing.h, measured.h + STICKY_PADDING * 2, STICKY_MIN_HEIGHT)
+      : measured.h;
     if (text === "") {
       if (editing.id) state.engine.exec(state.board, { cmd: "delete", id: editing.id });
     } else if (editing.id) {
       state.engine.exec(state.board, { cmd: "set_text", id: editing.id, text, w, h });
+    } else if (sticky) {
+      const id = state.engine.exec(state.board, {
+        cmd: "sticky",
+        x: editing.x,
+        y: editing.y,
+        w,
+        h,
+        text,
+        font_size: editing.size,
+        stroke: editing.stroke,
+        fill: editing.fill,
+        stroke_width: editing.stroke_width,
+        opacity: editing.opacity,
+      });
+      select(id);
     } else {
       const id = state.engine.exec(state.board, {
         cmd: "text",
@@ -272,6 +361,43 @@ function endTextEdit() {
 /** The view changed (draft, pan, zoom). Repaint; the document is unchanged. */
 function invalidate() {
   state.dirty = true;
+}
+
+function refreshZoomControl() {
+  zoomResetButton.textContent = `${Math.round(state.view.scale * 100)}%`;
+  zoomOutButton.disabled = state.view.scale <= MIN_ZOOM;
+  zoomInButton.disabled = state.view.scale >= MAX_ZOOM;
+}
+
+/** Change magnification while keeping one viewport point anchored. */
+function setZoom(scale, anchor = null) {
+  const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
+  const point = anchor ?? { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 };
+  state.view.x = point.x - ((point.x - state.view.x) * next) / state.view.scale;
+  state.view.y = point.y - ((point.y - state.view.y) * next) / state.view.scale;
+  state.view.scale = next;
+  refreshZoomControl();
+  invalidate();
+}
+
+function fitContent() {
+  const box = sceneBounds(state.scene);
+  if (box === null) {
+    state.view = { x: 0, y: 0, scale: 1 };
+    refreshZoomControl();
+    invalidate();
+    return;
+  }
+
+  const padding = 56;
+  const width = Math.max(1, canvas.clientWidth - padding * 2);
+  const height = Math.max(1, canvas.clientHeight - padding * 2);
+  const scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(width / Math.max(box.w, 1), height / Math.max(box.h, 1))));
+  state.view.scale = scale;
+  state.view.x = (canvas.clientWidth - box.w * scale) / 2 - box.x * scale;
+  state.view.y = (canvas.clientHeight - box.h * scale) / 2 - box.y * scale;
+  refreshZoomControl();
+  invalidate();
 }
 
 /**
@@ -307,6 +433,7 @@ function refreshControls() {
   const empty = state.scene.length === 0;
   pngButton.disabled = empty;
   svgButton.disabled = empty;
+  zoomFitButton.disabled = empty;
 }
 
 function stepHistory(backward) {
@@ -479,22 +606,29 @@ function describeForScreenReaders() {
     ...items.map((item, index) => {
       const box = bounds(item);
       const entry = document.createElement("li");
-      entry.textContent = `${item.kind} ${index + 1}, ${describeItem(item)}`;
+      entry.textContent = `${semanticKind(item)} ${index + 1}, ${describeItem(item)}`;
       return entry;
     }),
   );
+}
+
+function semanticKind(item) {
+  return item.role === "sticky" ? "sticky note" : item.kind;
 }
 
 function describeSelection() {
   const items = selected();
   let readout = "Nothing selected.";
   if (items.length === 1) {
-    readout = `Selected: ${items[0].kind}, ${describeItem(items[0])}.`;
+    readout = `Selected: ${semanticKind(items[0])}, ${describeItem(items[0])}.`;
   } else if (items.length > 1) {
     // Counted by kind rather than listed: "seven rectangles" is what someone
     // needs to hear, and seven near-identical sentences is not.
     const tally = new Map();
-    for (const item of items) tally.set(item.kind, (tally.get(item.kind) ?? 0) + 1);
+    for (const item of items) {
+      const kind = semanticKind(item);
+      tally.set(kind, (tally.get(kind) ?? 0) + 1);
+    }
     const parts = [...tally].map(([kind, count]) => `${count} ${kind}${count === 1 ? "" : "s"}`);
     readout = `Selected ${items.length} elements: ${parts.join(", ")}.`;
   }
@@ -947,7 +1081,7 @@ function commitDraft() {
   } else {
     // Ignore accidental click-sized shapes.
     if (Math.abs(draft.w) < 3 && Math.abs(draft.h) < 3) return;
-    state.engine.exec(state.board, {
+    const id = state.engine.exec(state.board, {
       cmd: "add",
       kind: draft.kind,
       x: draft.x,
@@ -957,8 +1091,10 @@ function commitDraft() {
       stroke: draft.stroke,
       fill: draft.fill,
       stroke_width: draft.stroke_width,
-      opacity: draft.opacity,
     });
+    if (draft.opacity < 1) {
+      state.engine.exec(state.board, { cmd: "style", id, opacity: draft.opacity });
+    }
   }
   flush();
   sceneChanged();
@@ -995,15 +1131,37 @@ canvas.addEventListener("pointerdown", (event) => {
   }
 
   if (state.tool === "text") {
+    // Keep the canvas' pointer default from stealing focus back after the
+    // handler opens the real textarea overlay.
+    event.preventDefault();
     const target = hitTest(x, y);
     // Clicking an existing label edits it rather than starting a new one on
     // top of it, which is what a second click on words obviously means.
     if (target?.text !== undefined && target?.text !== null) {
       select(target.id);
-      beginTextEdit({ id: target.id, ...bounds(target), text: target.text, size: target.font_size });
+      editTextItem(target);
     } else {
       select(null);
       beginTextEdit({ x, y });
+    }
+    return;
+  }
+
+  if (state.tool === "sticky") {
+    event.preventDefault();
+    const target = hitTest(x, y);
+    if (target?.role === "sticky") {
+      select(target.id);
+      editTextItem(target);
+    } else {
+      select(null);
+      beginTextEdit({
+        x,
+        y,
+        w: STICKY_MIN_WIDTH,
+        h: STICKY_MIN_HEIGHT,
+        role: "sticky",
+      });
     }
     return;
   }
@@ -1055,7 +1213,7 @@ canvas.addEventListener("dblclick", (event) => {
   const target = hitTest(x, y);
   if (target?.text === undefined || target?.text === null) return;
   select(target.id);
-  beginTextEdit({ id: target.id, ...bounds(target), text: target.text, size: target.font_size });
+  editTextItem(target);
 });
 
 canvas.addEventListener("pointermove", (event) => {
@@ -1148,12 +1306,8 @@ canvas.addEventListener(
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
     const factor = Math.exp(-event.deltaY * 0.0015);
-    const next = Math.min(6, Math.max(0.15, state.view.scale * factor));
     // Keep the point under the cursor fixed while zooming.
-    state.view.x = px - ((px - state.view.x) * next) / state.view.scale;
-    state.view.y = py - ((py - state.view.y) * next) / state.view.scale;
-    state.view.scale = next;
-    invalidate();
+    setZoom(state.view.scale * factor, { x: px, y: py });
   },
   { passive: false },
 );
@@ -1281,6 +1435,10 @@ for (const swatch of strokeSwatches) {
     applyStyle({ stroke: pack(state.colour) });
     // A label is drawn in the stroke colour, so an open editor has to follow.
     editor.style.color = state.colour;
+    if (state.editing) {
+      state.editing.stroke = pack(state.colour);
+      editor.style.setProperty("--sticky-stroke", state.colour);
+    }
   });
 }
 
@@ -1290,6 +1448,13 @@ for (const swatch of fillSwatches) {
     state.fill = swatch.dataset.fill;
     markChecked(fillSwatches, swatch);
     applyStyle({ fill: packOrNone(state.fill) });
+    if (state.editing?.role === "sticky") {
+      state.editing.fill = packOrNone(state.fill);
+      editor.style.setProperty(
+        "--sticky-fill",
+        state.fill === "none" ? "transparent" : state.fill,
+      );
+    }
   });
 }
 
@@ -1328,6 +1493,10 @@ redoButton.addEventListener("click", () => stepHistory(false));
 pngButton.addEventListener("click", exportPng);
 svgButton.addEventListener("click", exportSvg);
 recoveryButton.addEventListener("click", exportRecovery);
+zoomOutButton.addEventListener("click", () => setZoom(state.view.scale / 1.2));
+zoomResetButton.addEventListener("click", () => setZoom(1));
+zoomInButton.addEventListener("click", () => setZoom(state.view.scale * 1.2));
+zoomFitButton.addEventListener("click", fitContent);
 openStandaloneButton.addEventListener("click", () => {
   runtime.bridge?.emit("openStandalone", { scope: state.scope });
 });
@@ -1361,7 +1530,9 @@ const SHORTCUTS = {
   o: "ellipse",
   d: "diamond",
   a: "arrow",
+  l: "line",
   p: "freedraw",
+  s: "sticky",
   t: "text",
   e: "eraser",
 };
@@ -1408,6 +1579,11 @@ window.addEventListener("keydown", (event) => {
       select(state.scene.map((item) => item.id));
       return;
     }
+    if (key === "0") {
+      event.preventDefault();
+      setZoom(1);
+      return;
+    }
   }
   if (event.metaKey || event.ctrlKey || event.altKey) return;
 
@@ -1419,6 +1595,21 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     select(null);
+    return;
+  }
+  if (event.key === "+" || event.key === "=") {
+    event.preventDefault();
+    setZoom(state.view.scale * 1.2);
+    return;
+  }
+  if (event.key === "-") {
+    event.preventDefault();
+    setZoom(state.view.scale / 1.2);
+    return;
+  }
+  if (event.key === "0") {
+    event.preventDefault();
+    setZoom(1);
     return;
   }
   // Cycles what is selected, so every shortcut above is reachable without a
@@ -1446,6 +1637,7 @@ if (runtime.mode === "standalone") {
   window.addEventListener("hashchange", () => location.reload());
 }
 window.addEventListener("resize", invalidate);
+refreshZoomControl();
 
 // -- start -----------------------------------------------------------------
 

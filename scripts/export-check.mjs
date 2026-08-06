@@ -107,6 +107,7 @@ const scene = [
   { kind: "rectangle", x: 10, y: 20, w: 100, h: 60, stroke: 0x1e1e1eff, fill: 0, stroke_width: 2 },
   { kind: "ellipse", x: 200, y: 40, w: 80, h: 80, stroke: 0xe03131ff, fill: 0xffff00ff, stroke_width: 3 },
   { kind: "diamond", x: 300, y: 10, w: 50, h: 90, stroke: 0x1971c2ff, fill: 0, stroke_width: 2 },
+  { kind: "line", x: 360, y: 110, w: 90, h: 45, stroke: 0x1971c2ff, fill: 0, stroke_width: 3 },
   { kind: "arrow", x: 400, y: 200, w: -120, h: -60, stroke: 0x2f9e44ff, fill: 0, stroke_width: 2 },
   {
     kind: "freedraw",
@@ -136,6 +137,19 @@ const scene = [
     font_size: 20,
     // A second line, and characters that must not become markup.
     text: 'label <one> & "two"\nsecond line',
+  },
+  {
+    kind: "rectangle",
+    role: "sticky",
+    x: 820,
+    y: 80,
+    w: 180,
+    h: 120,
+    stroke: 0xf08c00ff,
+    fill: 0xffec99ff,
+    stroke_width: 2,
+    font_size: 20,
+    text: "sticky note\nsecond line",
   },
 ];
 

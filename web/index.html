@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
     <title>k-board</title>
-    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./style.css?v=1" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%E2%9C%8F%EF%B8%8F</text></svg>"
@@ -30,8 +30,14 @@
         <button data-tool="arrow" class="tool" aria-pressed="false" title="Arrow (A)">
           <span aria-hidden="true">&#8599;</span><span class="label">Arrow</span>
         </button>
+        <button data-tool="line" class="tool" aria-pressed="false" title="Line (L)">
+          <span aria-hidden="true">&#9585;</span><span class="label">Line</span>
+        </button>
         <button data-tool="freedraw" class="tool" aria-pressed="false" title="Pen (P)">
           <span aria-hidden="true">&#9998;</span><span class="label">Pen</span>
+        </button>
+        <button data-tool="sticky" class="tool" aria-pressed="false" title="Sticky note (S)">
+          <span aria-hidden="true">&#9635;</span><span class="label">Note</span>
         </button>
         <button data-tool="text" class="tool" aria-pressed="false" title="Text (T)">
           <span aria-hidden="true">&#84;</span><span class="label">Text</span>
@@ -146,12 +152,19 @@
         aria-label="Text content"
       ></textarea>
 
+      <div class="zoom-controls" role="group" aria-label="Canvas zoom">
+        <button id="zoomOut" class="zoom-button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+        <button id="zoomReset" class="zoom-value" title="Reset zoom to 100%">100%</button>
+        <button id="zoomIn" class="zoom-button" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zoomFit" class="zoom-fit" title="Fit all content in view">Fit</button>
+      </div>
+
       <div id="hint" class="hint">
         <strong>Open this page in a second tab</strong> — both are separate
         replicas. Draw in either and watch them converge.
       </div>
     </main>
 
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=1"></script>
   </body>
 </html>

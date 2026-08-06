@@ -128,6 +128,32 @@ check(
 );
 check("a shape is recreated as an add", clipboard.toCommand(centred).cmd === "add");
 
+const sticky = {
+  kind: "rectangle",
+  role: "sticky",
+  x: 20,
+  y: 30,
+  w: 180,
+  h: 120,
+  stroke: 0x1e1e1eff,
+  fill: 0xffec99ff,
+  stroke_width: 2,
+  opacity: 0.8,
+  font_size: 20,
+  text: "Launch plan",
+};
+const [copiedSticky] = clipboard.parse(clipboard.serialise([sticky]));
+const stickyCommand = clipboard.toCommand(copiedSticky);
+check("a sticky note keeps its semantic role", copiedSticky.role === "sticky");
+check("a sticky note is recreated atomically", stickyCommand.cmd === "sticky");
+check(
+  "a sticky note keeps text, surface, and opacity",
+  stickyCommand.text === "Launch plan" &&
+    stickyCommand.fill === 0xffec99ff &&
+    stickyCommand.opacity === 0.8,
+  JSON.stringify(stickyCommand),
+);
+
 // -- the round trip through the real engine --------------------------------
 
 const engine = await loadEngine(`${BASE}/kboard.wasm`);
@@ -177,6 +203,21 @@ check(
   "deleting the original leaves the copy alone",
   remaining.length === 1 && remaining[0].id === pasted,
   JSON.stringify(remaining),
+);
+
+const noteBoard = engine.open("clipboard-sticky-check", 2);
+const originalNote = engine.exec(noteBoard, clipboard.toCommand(sticky));
+const notePayload = clipboard.parse(clipboard.serialise(engine.scene(noteBoard)));
+const pastedNote = engine.exec(
+  noteBoard,
+  clipboard.toCommand(clipboard.place(notePayload, { x: 500, y: 500 })[0]),
+);
+const notes = engine.scene(noteBoard);
+check("sticky paste creates a second element", notes.length === 2 && originalNote !== pastedNote);
+check(
+  "sticky paste preserves its role and words",
+  notes.every((item) => item.role === "sticky" && item.text === "Launch plan"),
+  JSON.stringify(notes),
 );
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) failed.`);

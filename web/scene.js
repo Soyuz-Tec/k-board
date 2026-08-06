@@ -52,6 +52,7 @@ export const FONT_FAMILY = "ui-sans-serif, system-ui, -apple-system, Segoe UI, s
 
 /** Multiplied by the font size. Matches what the editor's textarea uses. */
 export const LINE_HEIGHT = 1.25;
+export const STICKY_PADDING = 16;
 
 export function fontFor(size) {
   return `${size}px ${FONT_FAMILY}`;
@@ -202,6 +203,40 @@ export function geometry(item) {
         };
       }
 
+    case "rectangle":
+      if (item.role === "sticky") {
+        const size = item.font_size || 20;
+        return {
+          fillable: true,
+          figures: [
+            {
+              close: true,
+              path: [
+                ["M", box.x, box.y],
+                ["L", box.x + box.w, box.y],
+                ["L", box.x + box.w, box.y + box.h],
+                ["L", box.x, box.y + box.h],
+              ],
+            },
+            {
+              text: {
+                size,
+                rows: lines(item).map((content, index) => ({
+                  content,
+                  x: box.x + STICKY_PADDING,
+                  y:
+                    box.y +
+                    STICKY_PADDING +
+                    size * LINE_HEIGHT * (index + 1) -
+                    size * 0.25,
+                })),
+              },
+            },
+          ],
+        };
+      }
+      return rectangleGeometry(box);
+
     case "ellipse":
       return {
         fillable: true,
@@ -231,6 +266,12 @@ export function geometry(item) {
             ],
           },
         ],
+      };
+
+    case "line":
+      return {
+        fillable: false,
+        figures: [{ path: [["M", item.x, item.y], ["L", item.x + item.w, item.y + item.h]] }],
       };
 
     case "arrow": {
@@ -277,21 +318,25 @@ export function geometry(item) {
     }
 
     default:
-      return {
-        fillable: true,
-        figures: [
-          {
-            close: true,
-            path: [
-              ["M", box.x, box.y],
-              ["L", box.x + box.w, box.y],
-              ["L", box.x + box.w, box.y + box.h],
-              ["L", box.x, box.y + box.h],
-            ],
-          },
-        ],
-      };
+      return rectangleGeometry(box);
   }
+}
+
+function rectangleGeometry(box) {
+  return {
+    fillable: true,
+    figures: [
+      {
+        close: true,
+        path: [
+          ["M", box.x, box.y],
+          ["L", box.x + box.w, box.y],
+          ["L", box.x + box.w, box.y + box.h],
+          ["L", box.x, box.y + box.h],
+        ],
+      },
+    ],
+  };
 }
 
 // -- canvas back-end -------------------------------------------------------
