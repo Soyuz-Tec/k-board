@@ -33,7 +33,10 @@ pub mod board;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use kboard_core::op::StampedOp;
 
@@ -51,12 +54,83 @@ pub const STATUS_REFUSED: u32 = 4;
 
 /// ABI version. Hosts should check this on load — the wasm and native artifacts
 /// must always come from the same build.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 #[derive(Default)]
 struct Registry {
-    boards: HashMap<u32, Board>,
+    boards: HashMap<u32, Arc<Mutex<Board>>>,
     next_handle: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum OperationClass {
+    Lifecycle,
+    Exec,
+    Merge,
+    Pending,
+    Load,
+    History,
+    Scene,
+}
+
+const OPERATION_CLASSES: [(&str, OperationClass); 7] = [
+    ("lifecycle", OperationClass::Lifecycle),
+    ("exec", OperationClass::Exec),
+    ("merge", OperationClass::Merge),
+    ("pending", OperationClass::Pending),
+    ("load", OperationClass::Load),
+    ("history", OperationClass::History),
+    ("scene", OperationClass::Scene),
+];
+
+#[derive(Default)]
+struct LockTiming {
+    calls: AtomicU64,
+    wait_ns: AtomicU64,
+    hold_ns: AtomicU64,
+    max_wait_ns: AtomicU64,
+    max_hold_ns: AtomicU64,
+}
+
+impl LockTiming {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn record(&self, wait_ns: u64, hold_ns: u64) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+        self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
+        self.max_wait_ns.fetch_max(wait_ns, Ordering::Relaxed);
+        self.max_hold_ns.fetch_max(hold_ns, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "calls": self.calls.load(Ordering::Relaxed),
+            "wait_ns": self.wait_ns.load(Ordering::Relaxed),
+            "hold_ns": self.hold_ns.load(Ordering::Relaxed),
+            "max_wait_ns": self.max_wait_ns.load(Ordering::Relaxed),
+            "max_hold_ns": self.max_hold_ns.load(Ordering::Relaxed),
+        })
+    }
+}
+
+struct FfiMetrics {
+    registry: [LockTiming; OPERATION_CLASSES.len()],
+    board: [LockTiming; OPERATION_CLASSES.len()],
+}
+
+impl Default for FfiMetrics {
+    fn default() -> Self {
+        Self {
+            registry: std::array::from_fn(|_| LockTiming::default()),
+            board: std::array::from_fn(|_| LockTiming::default()),
+        }
+    }
+}
+
+fn ffi_metrics() -> &'static FfiMetrics {
+    static METRICS: OnceLock<FfiMetrics> = OnceLock::new();
+    METRICS.get_or_init(FfiMetrics::default)
 }
 
 /// Boards are process-global, not thread-local: a native host may open a board
@@ -69,11 +143,55 @@ fn registry() -> &'static Mutex<Registry> {
 
 /// Recovers from poisoning rather than propagating it. A panic in one call must
 /// not permanently disable the library for a long-lived host process.
-fn with_registry<T>(action: impl FnOnce(&mut Registry) -> T) -> T {
+fn with_registry<T>(class: OperationClass, action: impl FnOnce(&mut Registry) -> T) -> T {
+    #[cfg(target_arch = "wasm32")]
+    let _ = class;
+    #[cfg(not(target_arch = "wasm32"))]
+    let waiting = Instant::now();
     let mut guard = registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    action(&mut guard)
+    #[cfg(not(target_arch = "wasm32"))]
+    let acquired = Instant::now();
+    let result = action(&mut guard);
+    #[cfg(not(target_arch = "wasm32"))]
+    ffi_metrics().registry[class as usize].record(
+        acquired
+            .duration_since(waiting)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64,
+        acquired.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+    );
+    result
+}
+
+fn board_handle(handle: u32, class: OperationClass) -> Option<Arc<Mutex<Board>>> {
+    with_registry(class, |registry| registry.boards.get(&handle).cloned())
+}
+
+fn with_board<T>(
+    handle: u32,
+    class: OperationClass,
+    action: impl FnOnce(&mut Board) -> T,
+) -> Option<T> {
+    let board = board_handle(handle, class)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let waiting = Instant::now();
+    let mut guard = board
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(not(target_arch = "wasm32"))]
+    let acquired = Instant::now();
+    let result = action(&mut guard);
+    #[cfg(not(target_arch = "wasm32"))]
+    ffi_metrics().board[class as usize].record(
+        acquired
+            .duration_since(waiting)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64,
+        acquired.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+    );
+    Some(result)
 }
 
 thread_local! {
@@ -145,6 +263,34 @@ pub extern "C" fn kb_last_len() -> usize {
     LAST.with(|slot| slot.borrow().len())
 }
 
+/// Publish bounded lock telemetry as JSON.
+///
+/// Operation class is the only label. Handles, scopes and host-supplied values
+/// are deliberately absent, so an embedded process cannot create unbounded
+/// metric cardinality through this ABI.
+#[no_mangle]
+pub extern "C" fn kb_metrics() -> u32 {
+    guarded(|| {
+        let metrics = ffi_metrics();
+        let mut registry = serde_json::Map::new();
+        let mut board = serde_json::Map::new();
+        for (name, class) in OPERATION_CLASSES {
+            registry.insert(name.to_owned(), metrics.registry[class as usize].snapshot());
+            board.insert(name.to_owned(), metrics.board[class as usize].snapshot());
+        }
+        match serde_json::to_vec(&serde_json::json!({
+            "registry_lock": registry,
+            "board_lock": board,
+        })) {
+            Ok(bytes) => {
+                publish(bytes);
+                STATUS_OK
+            }
+            Err(_) => STATUS_REFUSED,
+        }
+    })
+}
+
 // -- lifecycle -------------------------------------------------------------
 
 /// Open a board in `scope` for `actor`. Returns a handle, or `0` on failure.
@@ -155,18 +301,18 @@ pub extern "C" fn kb_last_len() -> usize {
 /// # Safety
 /// `scope_ptr`/`scope_len` must describe valid UTF-8 bytes.
 #[no_mangle]
-pub unsafe extern "C" fn kb_open(scope_ptr: *const u8, scope_len: usize, actor: u32) -> u32 {
+pub unsafe extern "C" fn kb_open(scope_ptr: *const u8, scope_len: usize, actor: u64) -> u32 {
     let scope = match borrow_str(scope_ptr, scope_len) {
         Some(text) => text.to_owned(),
         None => return 0,
     };
     catch_unwind(AssertUnwindSafe(|| {
-        with_registry(|registry| {
+        with_registry(OperationClass::Lifecycle, |registry| {
             registry.next_handle += 1;
             let handle = registry.next_handle;
             registry
                 .boards
-                .insert(handle, Board::open(&scope, u64::from(actor)));
+                .insert(handle, Arc::new(Mutex::new(Board::open(&scope, actor))));
             handle
         })
     }))
@@ -176,7 +322,7 @@ pub unsafe extern "C" fn kb_open(scope_ptr: *const u8, scope_len: usize, actor: 
 #[no_mangle]
 pub extern "C" fn kb_close(handle: u32) -> u32 {
     guarded(|| {
-        with_registry(|registry| {
+        with_registry(OperationClass::Lifecycle, |registry| {
             if registry.boards.remove(&handle).is_some() {
                 STATUS_OK
             } else {
@@ -208,10 +354,7 @@ pub unsafe extern "C" fn kb_exec(handle: u32, ptr: *const u8, len: usize, now_ms
     };
 
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get_mut(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::Exec, |board| {
             match board.exec(&command, now) {
                 Ok(id) => {
                     publish(id.unwrap_or_default().into_bytes());
@@ -219,7 +362,10 @@ pub unsafe extern "C" fn kb_exec(handle: u32, ptr: *const u8, len: usize, now_ms
                 }
                 Err(_) => STATUS_REFUSED,
             }
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -237,14 +383,14 @@ pub unsafe extern "C" fn kb_merge(handle: u32, ptr: *const u8, len: usize) -> u3
     };
 
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get_mut(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::Merge, |board| {
             let changed = board.merge_ops(&ops);
             publish(changed.to_string().into_bytes());
             STATUS_OK
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -252,10 +398,7 @@ pub unsafe extern "C" fn kb_merge(handle: u32, ptr: *const u8, len: usize) -> u3
 #[no_mangle]
 pub extern "C" fn kb_pending(handle: u32) -> u32 {
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get_mut(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::Pending, |board| {
             let pending = board.take_pending();
             match serde_json::to_vec(&pending) {
                 Ok(bytes) => {
@@ -264,7 +407,10 @@ pub extern "C" fn kb_pending(handle: u32) -> u32 {
                 }
                 Err(_) => STATUS_REFUSED,
             }
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -285,10 +431,7 @@ pub unsafe extern "C" fn kb_load(handle: u32, ptr: *const u8, len: usize) -> u32
     };
 
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get_mut(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::Load, |board| {
             match board.merge_document(&incoming) {
                 Ok(changed) => {
                     publish(changed.to_string().into_bytes());
@@ -296,7 +439,10 @@ pub unsafe extern "C" fn kb_load(handle: u32, ptr: *const u8, len: usize) -> u32
                 }
                 Err(_) => STATUS_REFUSED,
             }
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -321,13 +467,13 @@ pub extern "C" fn kb_redo(handle: u32, now_ms: f64) -> u32 {
 #[no_mangle]
 pub extern "C" fn kb_history(handle: u32) -> u32 {
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::History, |board| {
             publish(format!("{},{}", board.can_undo(), board.can_redo()).into_bytes());
             STATUS_OK
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -339,10 +485,7 @@ fn step(handle: u32, now_ms: f64, backward: bool) -> u32 {
     };
 
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get_mut(&handle) else {
-                return STATUS_NO_BOARD;
-            };
+        let Some(outcome) = with_board(handle, OperationClass::History, |board| {
             let moved = if backward {
                 board.undo(now)
             } else {
@@ -350,7 +493,10 @@ fn step(handle: u32, now_ms: f64, backward: bool) -> u32 {
             };
             publish(moved.to_string().into_bytes());
             STATUS_OK
-        })
+        }) else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
@@ -358,24 +504,30 @@ fn step(handle: u32, now_ms: f64, backward: bool) -> u32 {
 #[no_mangle]
 pub extern "C" fn kb_scene(handle: u32) -> u32 {
     guarded(|| {
-        with_registry(|registry| {
-            let Some(board) = registry.boards.get(&handle) else {
-                return STATUS_NO_BOARD;
-            };
-            match serde_json::to_vec(&board.scene()) {
-                Ok(bytes) => {
-                    publish(bytes);
-                    STATUS_OK
-                }
-                Err(_) => STATUS_REFUSED,
-            }
-        })
+        let Some(outcome) =
+            with_board(
+                handle,
+                OperationClass::Scene,
+                |board| match serde_json::to_vec(&board.scene()) {
+                    Ok(bytes) => {
+                        publish(bytes);
+                        STATUS_OK
+                    }
+                    Err(_) => STATUS_REFUSED,
+                },
+            )
+        else {
+            return STATUS_NO_BOARD;
+        };
+        outcome
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kboard_core::clock::ActorId;
+    use kboard_core::element::ElementId;
 
     fn call_exec(handle: u32, json: &str) -> u32 {
         unsafe { kb_exec(handle, json.as_ptr(), json.len(), 1_000.0) }
@@ -385,7 +537,7 @@ mod tests {
         LAST.with(|slot| String::from_utf8(slot.borrow().clone()).unwrap())
     }
 
-    fn open(scope: &str, actor: u32) -> u32 {
+    fn open(scope: &str, actor: u64) -> u32 {
         unsafe { kb_open(scope.as_ptr(), scope.len(), actor) }
     }
 
@@ -431,6 +583,74 @@ mod tests {
 
         kb_close(alice);
         kb_close(bob);
+    }
+
+    #[test]
+    fn a_busy_board_does_not_block_an_independent_handle() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let busy = open("tenant/busy", 11);
+        let independent = open("tenant/independent", 12);
+        let busy_board = board_handle(busy, OperationClass::Scene).unwrap();
+        let busy_guard = busy_board.lock().unwrap();
+
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(kb_scene(independent)).unwrap();
+        });
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(500)).unwrap(),
+            STATUS_OK,
+            "serialising another handle must not wait for the busy board"
+        );
+
+        drop(busy_guard);
+        worker.join().unwrap();
+        kb_close(busy);
+        kb_close(independent);
+    }
+
+    #[test]
+    fn close_detaches_new_calls_while_a_cloned_in_flight_handle_can_finish() {
+        let handle = open("tenant/close-race", 21);
+        let in_flight = board_handle(handle, OperationClass::Exec).unwrap();
+
+        assert_eq!(kb_close(handle), STATUS_OK);
+        assert_eq!(kb_scene(handle), STATUS_NO_BOARD);
+
+        // A call that completed lookup before close owns this Arc. Close is a
+        // linearization point for future lookup, not cancellation of code that
+        // may already be inside host or allocator work.
+        let mut board = in_flight.lock().unwrap();
+        assert!(board
+            .exec(
+                &Command::Add {
+                    kind: "rectangle".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                    stroke: 0,
+                    fill: 0,
+                    stroke_width: 1.0,
+                },
+                1_000,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn lock_metrics_are_bounded_by_operation_class() {
+        let handle = open("tenant/metrics", 31);
+        assert_eq!(kb_scene(handle), STATUS_OK);
+        assert_eq!(kb_metrics(), STATUS_OK);
+        let value: serde_json::Value = serde_json::from_str(&last_string()).unwrap();
+        assert_eq!(value["registry_lock"].as_object().unwrap().len(), 7);
+        assert_eq!(value["board_lock"].as_object().unwrap().len(), 7);
+        assert!(value["board_lock"]["scene"]["calls"].as_u64().unwrap() >= 1);
+        assert!(value["registry_lock"]["scene"]["calls"].as_u64().unwrap() >= 1);
+        kb_close(handle);
     }
 
     #[test]
@@ -482,6 +702,21 @@ mod tests {
     }
 
     #[test]
+    fn actor_above_u32_survives_the_abi() {
+        let actor = u64::from(u32::MAX) + 42;
+        let handle = open("tenant/large-actor", actor);
+        assert_eq!(
+            call_exec(
+                handle,
+                r#"{"cmd":"add","kind":"rectangle","x":1,"y":2,"w":3,"h":4,"stroke":255}"#,
+            ),
+            STATUS_OK
+        );
+        let id = ElementId::from_hex(&last_string()).unwrap();
+        assert_eq!(id.actor(), ActorId(actor));
+    }
+
+    #[test]
     fn loading_a_document_from_another_tenant_is_refused() {
         let handle = open("tenant-a/board", 1);
         call_exec(
@@ -512,9 +747,10 @@ mod tests {
         );
         assert_eq!(kb_scene(alice), STATUS_OK);
 
-        let document = with_registry(|registry| {
-            serde_json::to_string(registry.boards[&alice].document()).unwrap()
-        });
+        let document = with_board(alice, OperationClass::Load, |board| {
+            serde_json::to_string(board.document()).unwrap()
+        })
+        .unwrap();
         assert_eq!(
             unsafe { kb_load(bob, document.as_ptr(), document.len()) },
             STATUS_OK

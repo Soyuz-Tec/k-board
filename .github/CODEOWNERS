@@ -1,0 +1,10 @@
+# Repository owner. Add an independent architecture/security collaborator before
+# requiring code-owner approval on protected main.
+* @Soyuz-Tec
+
+/docs/ARCHITECTURE.md @Soyuz-Tec
+/docs/adr/ @Soyuz-Tec
+/docs/security/ @Soyuz-Tec
+/crates/kboard-ffi/ @Soyuz-Tec
+/crates/kboard-server/ @Soyuz-Tec
+/.github/ @Soyuz-Tec

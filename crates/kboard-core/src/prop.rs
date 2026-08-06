@@ -150,6 +150,16 @@ impl PropKey {
             other => Self::Custom(other.strip_prefix('~').unwrap_or(other).to_owned()),
         }
     }
+
+    /// Conservative in-memory payload estimate used by hosts for aggregate
+    /// room budgets. It intentionally includes key overhead rather than
+    /// claiming to be an allocator-exact measurement.
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Custom(name) => 16_usize.saturating_add(name.len()),
+            _ => 16,
+        }
+    }
 }
 
 impl Serialize for PropKey {
@@ -198,6 +208,42 @@ impl PropValue {
         }
     }
 
+    /// Whether this value is both safe and meaningful for `key`.
+    ///
+    /// Custom host properties deliberately accept every bounded value. Known
+    /// properties are strict: a future-stamped string in `deleted`, for
+    /// example, would otherwise dominate the boolean tombstone while readers
+    /// interpreted it as `false`.
+    pub fn is_valid_for(&self, key: &PropKey) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
+
+        match key {
+            PropKey::Kind => matches!(self, Self::Kind(_)),
+            PropKey::X
+            | PropKey::Y
+            | PropKey::Width
+            | PropKey::Height
+            | PropKey::Angle
+            | PropKey::StrokeWidth
+            | PropKey::Opacity
+            | PropKey::Roughness
+            | PropKey::FontSize => matches!(self, Self::Num(_) | Self::Int(_)),
+            PropKey::Stroke | PropKey::Fill => matches!(self, Self::Color(_)),
+            PropKey::Text | PropKey::FontFamily | PropKey::ZIndex => {
+                matches!(self, Self::Text(_))
+            }
+            PropKey::Points => matches!(self, Self::Points(_)),
+            PropKey::Locked | PropKey::Deleted => matches!(self, Self::Bool(_)),
+            // Null clears optional group membership without inventing a
+            // separate operation; custom keys retain the engine's extension
+            // value vocabulary.
+            PropKey::GroupId => matches!(self, Self::Text(_) | Self::Null),
+            PropKey::Custom(_) => true,
+        }
+    }
+
     pub fn as_num(&self) -> Option<f64> {
         match self {
             Self::Num(n) => Some(*n),
@@ -233,6 +279,17 @@ impl PropValue {
             _ => None,
         }
     }
+
+    /// Conservative payload size for server resource governance.
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => 24_usize.saturating_add(text.len()),
+            Self::Points(points) => {
+                24_usize.saturating_add(points.len().saturating_mul(std::mem::size_of::<Point>()))
+            }
+            _ => 24,
+        }
+    }
 }
 
 /// Upper bound on a single text property. Hosts impose their own limits too;
@@ -260,6 +317,24 @@ mod tests {
     fn oversized_text_is_rejected() {
         let big = PropValue::Text("x".repeat(MAX_TEXT_BYTES + 1));
         assert!(!big.is_valid());
+    }
+
+    #[test]
+    fn known_keys_reject_values_their_readers_cannot_interpret() {
+        assert!(PropValue::Num(1.0).is_valid_for(&PropKey::X));
+        assert!(PropValue::Int(1).is_valid_for(&PropKey::X));
+        assert!(!PropValue::Text("1".into()).is_valid_for(&PropKey::X));
+        assert!(PropValue::Bool(true).is_valid_for(&PropKey::Deleted));
+        assert!(!PropValue::Text("false".into()).is_valid_for(&PropKey::Deleted));
+        assert!(PropValue::Null.is_valid_for(&PropKey::GroupId));
+    }
+
+    #[test]
+    fn custom_keys_keep_the_bounded_extension_value_vocabulary() {
+        let key = PropKey::Custom("host-data".into());
+        assert!(PropValue::Null.is_valid_for(&key));
+        assert!(PropValue::Text("value".into()).is_valid_for(&key));
+        assert!(!PropValue::Num(f64::NAN).is_valid_for(&key));
     }
 
     #[test]

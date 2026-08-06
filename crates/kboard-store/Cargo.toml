@@ -12,12 +12,13 @@ bench = false
 
 [dependencies]
 kboard-core = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 # `bundled` compiles SQLite from source rather than linking whatever the host
 # happens to ship. A storage engine whose version varies by machine is not a
 # durability guarantee, and the engine is meant to run in other people's
 # environments.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Exercise the documented monthly recovery drill even when no code changes.
+    - cron: "17 3 1 * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Required only for the report-only PR size comparison below.
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,6 +30,15 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Architecture boundaries and documentation
+        run: node scripts/architecture-check.mjs
+
+      - name: Durable client outbox
+        run: node scripts/client-outbox-check.mjs
+
+      - name: Review-size advisory
+        run: node scripts/review-size-report.mjs
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -35,6 +50,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets
+
+      - name: Upgraded database release smoke
+        run: cargo test --release -p kboard-store tests::every_supported_schema_fixture_migrates_to_current -- --exact
 
       - name: Doc tests
         run: cargo test --workspace --doc
@@ -120,6 +138,7 @@ jobs:
 
       - name: Build engine and server
         run: |
+          cargo build -p kboard-ffi --release
           cargo build -p kboard-ffi --target wasm32-unknown-unknown --release
           cargo build -p kboard-server --release
 
@@ -136,11 +155,23 @@ jobs:
       - name: Two-replica convergence
         run: node scripts/two-replica-check.mjs
 
+      - name: Protocol v2 and mixed-version delivery
+        run: node scripts/protocol-v2-check.mjs
+
       # Kills the server and starts a new process against the same database.
       # Nothing short of an actual restart demonstrates that a board survives
       # the process that was holding it.
       - name: Restart durability
         run: node scripts/restart-durability-check.mjs
+
+      - name: Storage migration and checkpoint health
+        run: node scripts/storage-health-check.mjs
+
+      - name: Room-cell fairness SLO
+        run: node scripts/room-cell-slo-check.mjs
+
+      - name: Backup and isolated restore game day
+        run: node scripts/backup-restore-drill.mjs
 
       # The unit tests prove the token maths. This proves the running server
       # turns an unauthenticated handshake away, and will not start at all in
@@ -173,6 +204,45 @@ jobs:
       # after the file has been sent.
       - name: Export fidelity
         run: node scripts/export-check.mjs
+
+      - name: Assemble immutable release candidate
+        shell: bash
+        run: |
+          bundle="dist/k-board-${GITHUB_SHA}"
+          mkdir -p "$bundle/web"
+          cp target/release/kboard-server "$bundle/"
+          cp target/release/libkboard.so target/release/libkboard.a "$bundle/"
+          cp target/wasm32-unknown-unknown/release/kboard.wasm "$bundle/"
+          cp web/*.js web/index.html "$bundle/web/"
+          cp README.md LICENSE "$bundle/"
+          (cd "$bundle" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+      - name: Validate assembled release candidate
+        shell: bash
+        run: |
+          bundle="dist/k-board-${GITHUB_SHA}"
+          (cd "$bundle" && sha256sum -c SHA256SUMS)
+          PORT=8180 \
+          KBOARD_DB="$RUNNER_TEMP/k-board-artifact.sqlite3" \
+          KBOARD_WEB="$bundle/web" \
+          KBOARD_WASM="$bundle/kboard.wasm" \
+          "$bundle/kboard-server" >"$RUNNER_TEMP/k-board-artifact.log" 2>&1 &
+          artifact_pid=$!
+          trap 'kill "$artifact_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8180/health/ready && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8180/health/ready | grep -q '"status":"ready"'
+          curl -sf http://127.0.0.1:8180/kboard.wasm >/dev/null
+
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: k-board-${{ github.sha }}
+          path: dist/k-board-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
 
   audit:
     name: dependency audit

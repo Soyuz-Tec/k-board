@@ -21,6 +21,7 @@ import {
 import * as transform from "./transform.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
 import * as clipboard from "./clipboard.js";
+import { OutboxLimitError, createClientOutbox } from "./outbox.js";
 
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
@@ -35,8 +36,24 @@ const undoButton = document.getElementById("undo");
 const redoButton = document.getElementById("redo");
 const pngButton = document.getElementById("exportPng");
 const svgButton = document.getElementById("exportSvg");
+const recoveryButton = document.getElementById("exportRecovery");
 
 const COMMIT_INTERVAL_MS = 50; // live-drag update rate sent to peers
+
+// A query bearer is a bootstrap compatibility surface, never durable browser
+// state. Capture it once, then remove it before another navigation, screenshot
+// or history inspection can retain it. The WebSocket still carries it only as
+// a subprotocol.
+const bootstrapUrl = new URL(location.href);
+const bootstrapToken = bootstrapUrl.searchParams.get("token");
+if (bootstrapToken !== null) {
+  bootstrapUrl.searchParams.delete("token");
+  history.replaceState(
+    null,
+    "",
+    `${bootstrapUrl.pathname}${bootstrapUrl.search}${bootstrapUrl.hash}`,
+  );
+}
 
 const state = {
   engine: null,
@@ -53,7 +70,16 @@ const state = {
   draft: null,
   pan: null,
   socket: null,
-  outbox: [],
+  bootstrapToken,
+  outbox: null,
+  replica: null,
+  negotiated: false,
+  inFlight: null,
+  ackTimer: null,
+  retryTimer: null,
+  reconnectAttempt: 0,
+  captureChain: Promise.resolve(),
+  localOnlyOps: [],
   everConnected: false,
   dirty: true,
   // Throwaway. Never reaches the engine, never reaches the log.
@@ -520,19 +546,93 @@ function ensureBoard(actor) {
   state.board = state.engine.open(state.scope, actor);
 }
 
-function flush() {
-  if (state.board === null) return;
-  const ops = state.engine.pending(state.board);
-  if (ops.length > 0) state.outbox.push(...ops);
-  if (state.outbox.length === 0) return;
+function outboxSummary() {
+  return state.outbox?.snapshot() ?? {
+    pending: 0,
+    sending: 0,
+    refused: 0,
+    batches: 0,
+    operations: state.localOnlyOps.length,
+    durableStorage: false,
+    limitation: "outbox is starting",
+  };
+}
 
-  if (state.socket?.readyState === WebSocket.OPEN) {
-    state.socket.send(JSON.stringify({ type: "ops", ops: state.outbox }));
-    // Only cleared once handed to an open socket. Anything drawn while offline
-    // waits here and replays on reconnect — merge is idempotent, so a resend
-    // that the server already saw costs nothing.
-    state.outbox = [];
+function durabilityStatus(prefix) {
+  const summary = outboxSummary();
+  const local = summary.operations + state.localOnlyOps.length;
+  const parts = [prefix];
+  if (summary.sending > 0) parts.push(`${summary.sending} sending`);
+  if (local > 0) parts.push(`${local} awaiting durable ack`);
+  if (summary.refused > 0) parts.push(`${summary.refused} recovery required`);
+  if (!summary.durableStorage) parts.push("this tab only");
+  return parts.join(" · ");
+}
+
+function armOutboxRetry() {
+  clearTimeout(state.retryTimer);
+  const retryAt = state.outbox?.nextRetryAt();
+  if (retryAt === null || retryAt === undefined) return;
+  state.retryTimer = setTimeout(() => void sendNextBatch(), Math.max(0, retryAt - Date.now()));
+}
+
+async function sendNextBatch() {
+  if (
+    state.inFlight !== null ||
+    !state.negotiated ||
+    state.socket?.readyState !== WebSocket.OPEN ||
+    state.outbox === null
+  ) {
+    return;
   }
+  const batch = state.outbox.nextReady();
+  if (!batch) {
+    armOutboxRetry();
+    return;
+  }
+  if (!(await state.outbox.markSending(batch.id))) return;
+  state.inFlight = batch.id;
+  setStatus("live", durabilityStatus(`live · ${state.scope}`));
+  try {
+    state.socket.send(JSON.stringify({ type: "ops", batch: batch.id, ops: batch.operations }));
+  } catch {
+    state.inFlight = null;
+    await state.outbox.resetSending("socket send failed before acknowledgement");
+    state.socket.close();
+    return;
+  }
+  clearTimeout(state.ackTimer);
+  state.ackTimer = setTimeout(() => {
+    if (state.inFlight === batch.id) state.socket?.close();
+  }, 10_000);
+}
+
+function flush() {
+  if (state.board === null || state.outbox === null) return;
+  const ops = state.engine.pending(state.board);
+  if (ops.length > 0) state.localOnlyOps.push(...ops);
+  state.captureChain = state.captureChain.then(async () => {
+    if (state.localOnlyOps.length > 0) {
+      const count = state.localOnlyOps.length;
+      const capture = state.localOnlyOps.slice(0, count);
+      try {
+        await state.outbox.capture(capture);
+        state.localOnlyOps.splice(0, count);
+      } catch (error) {
+        recoveryButton.disabled = false;
+        const reason =
+          error instanceof OutboxLimitError
+            ? "offline queue full · export recovery copy"
+            : "browser storage failed · edits remain local-only";
+        setStatus("offline", durabilityStatus(reason));
+        return;
+      }
+    }
+    if (!state.negotiated || state.socket?.readyState !== WebSocket.OPEN) {
+      setStatus("offline", durabilityStatus("offline · edits retained"));
+    }
+    await sendNextBatch();
+  });
 }
 
 function connect() {
@@ -540,17 +640,18 @@ function connect() {
   const url = `${protocol}://${location.host}/ws/${encodeURIComponent(state.scope)}`;
   // Offered as a subprotocol rather than a query parameter: a URL ends up in
   // server logs, browser history, and referrers. An open server ignores it.
-  const token = new URLSearchParams(location.search).get("token");
+  const token = state.bootstrapToken;
   const socket = token
-    ? new WebSocket(url, [`kboard.token.${token}`])
-    : new WebSocket(url);
+    ? new WebSocket(url, ["kboard.v2", `kboard.token.${token}`])
+    : new WebSocket(url, ["kboard.v2"]);
   state.socket = socket;
+  state.negotiated = false;
   setStatus("", "connecting");
 
   socket.onopen = () => {
     state.everConnected = true;
-    setStatus("live", `live · ${state.scope}`);
-    flush();
+    socket.send(JSON.stringify({ type: "hello", version: 2, replica: state.replica }));
+    setStatus("", durabilityStatus("negotiating"));
   };
 
   socket.onmessage = (event) => {
@@ -562,11 +663,50 @@ function connect() {
     }
 
     if (message.type === "init") {
+      if (message.version !== 2 || message.replica !== state.replica || message.actor !== state.actor) {
+        setStatus("offline", "protocol identity mismatch · edits retained");
+        socket.close();
+        return;
+      }
       ensureBoard(message.actor);
       state.engine.load(state.board, JSON.stringify(message.doc));
-      setStatus("live", `live · ${state.scope} · you are #${message.actor}`);
+      state.negotiated = true;
+      state.reconnectAttempt = 0;
+      setStatus("live", durabilityStatus(`live · ${state.scope} · you are #${message.actor}`));
       flush();
       sceneChanged();
+    } else if (message.type === "ack") {
+      const acknowledged = message.batch;
+      state.captureChain = state.captureChain.then(async () => {
+        const outcome = await state.outbox.acknowledge(acknowledged, message.sequence);
+        if (state.inFlight === acknowledged) {
+          state.inFlight = null;
+          clearTimeout(state.ackTimer);
+        }
+        if (outcome !== "unknown") {
+          setStatus("live", durabilityStatus(`durable · sequence ${message.sequence}`));
+        }
+        await sendNextBatch();
+      });
+    } else if (message.type === "refused") {
+      state.captureChain = state.captureChain.then(async () => {
+        const outcome = await state.outbox.refuse(
+          message.batch,
+          message.code,
+          message.retryable,
+        );
+        if (state.inFlight === message.batch) {
+          state.inFlight = null;
+          clearTimeout(state.ackTimer);
+        }
+        if (outcome === "permanent") {
+          recoveryButton.disabled = false;
+          setStatus("offline", durabilityStatus(`refused ${message.code} · export recovery copy`));
+        } else {
+          setStatus("offline", durabilityStatus(`retrying after ${message.code}`));
+          armOutboxRetry();
+        }
+      });
     } else if (message.type === "ops") {
       state.engine.merge(state.board, JSON.stringify(message.ops));
       sceneChanged();
@@ -579,20 +719,34 @@ function connect() {
   };
 
   socket.onclose = (event) => {
+    state.negotiated = false;
+    state.inFlight = null;
+    clearTimeout(state.ackTimer);
+    state.captureChain = state.captureChain.then(() =>
+      state.outbox.resetSending("connection closed before durable acknowledgement"),
+    );
     // 1008/1006 after an immediate close usually means the handshake was
     // refused. Retrying forever against a rejected token looks like a network
     // problem to the user, so name it.
     if (!state.everConnected) {
-      setStatus("offline", "offline · not authorised for this board");
+      setStatus("offline", durabilityStatus("offline · not authorised or unreachable"));
       return;
     }
     // Nobody is reachable, so nobody's cursor is current. Leaving them on
     // screen would show a room full of people who cannot see you.
     state.presence.clear();
     peersChanged();
-    setStatus("offline", "offline · edits are queued");
-    // Reconnect, and keep drawing meanwhile. The queue drains on reopen.
-    setTimeout(connect, 1200);
+    setStatus(
+      "offline",
+      durabilityStatus(
+        event.code === 1008 ? "authorization expired · refresh access" : "offline · edits retained",
+      ),
+    );
+    const ceiling = Math.min(30_000, 600 * 2 ** Math.min(state.reconnectAttempt, 6));
+    const delay = Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
+    state.reconnectAttempt += 1;
+    clearTimeout(state.retryTimer);
+    state.retryTimer = setTimeout(connect, delay);
   };
 
   socket.onerror = () => socket.close();
@@ -1096,6 +1250,25 @@ function exportPng() {
   }, "image/png");
 }
 
+function exportRecovery() {
+  if (state.outbox === null) return;
+  const recovery = {
+    format: "kboard-recovery-v1",
+    exportedAt: new Date().toISOString(),
+    scope: state.scope,
+    replica: state.replica,
+    actor: state.actor === null ? null : String(state.actor),
+    outbox: state.outbox.exportData(),
+    // A quota failure leaves these operations deliberately in memory rather
+    // than pretending they are durable. Include them while this tab is alive.
+    localOnlyOperations: state.localOnlyOps,
+  };
+  download(
+    new Blob([`${JSON.stringify(recovery, null, 2)}\n`], { type: "application/json" }),
+    exportName("recovery.json"),
+  );
+}
+
 // -- chrome ----------------------------------------------------------------
 
 function selectTool(tool) {
@@ -1164,6 +1337,7 @@ undoButton.addEventListener("click", () => stepHistory(true));
 redoButton.addEventListener("click", () => stepHistory(false));
 pngButton.addEventListener("click", exportPng);
 svgButton.addEventListener("click", exportSvg);
+recoveryButton.addEventListener("click", exportRecovery);
 
 document.getElementById("clear").addEventListener("click", () => {
   if (state.board === null) return;
@@ -1276,17 +1450,20 @@ window.addEventListener("resize", invalidate);
     return;
   }
 
+  const client = await createClientOutbox(state.scope);
+  state.outbox = client.outbox;
+  state.replica = client.replica;
+  ensureBoard(client.actor);
+  const restoredOperations = state.outbox.allOperations();
+  if (restoredOperations.length > 0) {
+    state.engine.merge(state.board, JSON.stringify(restoredOperations));
+    setStatus("offline", durabilityStatus("restored pending work"));
+  } else if (!state.outbox.snapshot().durableStorage) {
+    setStatus("offline", durabilityStatus("local board"));
+  }
+  recoveryButton.disabled = state.outbox.snapshot().refused === 0;
+  sceneChanged();
   connect();
-
-  // Local-first: if the server never answers, open a board anyway with a
-  // locally chosen actor id and keep working. Everything queues for reconnect.
-  setTimeout(() => {
-    if (state.board === null) {
-      ensureBoard(crypto.getRandomValues(new Uint32Array(1))[0]);
-      setStatus("offline", "offline · local board");
-      sceneChanged();
-    }
-  }, 2500);
 
   requestAnimationFrame(frame);
 })();

@@ -72,7 +72,86 @@ Measured against an on-disk database, not `:memory:`. An in-memory store
 measures serialisation and nothing else, which is the part that was never in
 question.
 
+### Gate 3 exact-snapshot remeasurement
+
+Re-measured **2026-08-05** after versioned migrations, exact captured coverage,
+atomic snapshot/prefix truncation and WAL checkpoint policy. This is a single
+local run on the same Intel Core Ultra 7 255H / Windows 11 Pro machine using
+Rust 1.97.1 and:
+
+```bash
+cargo bench -p kboard-store --bench store -- --noplot
+```
+
+| Benchmark | Criterion median |
+|---|---:|
+| append, one shape | 131 µs |
+| append, ten shapes | 478 µs |
+| append, one hundred shapes | 2.15 ms |
+| snapshot, 100 shapes | 255 µs |
+| snapshot, 1,000 shapes | 9.47 ms |
+| snapshot, 10,000 shapes | **631 ms** |
+| restore, 100 shapes | 1.25 ms |
+| restore, 1,000 shapes | 6.26 ms |
+| restore, 10,000 shapes | **102 ms** |
+
+These are comparative baselines, not hard CI thresholds. The large-snapshot
+result reinforces the architectural choice in ADR-0022: one bounded writer,
+one in-flight durable request per scope, coalesced snapshot candidates and FIFO
+cross-scope admission. Gate 4 now implements that bounded writer and removes the
+former global document lock.
+
+### Gate 4 room-cell burst baseline
+
+Measured **2026-08-05** on the same Windows workstation with the deterministic
+room-cell burst test:
+
+```text
+cargo test -q -p kboard-server \
+  room_cell::tests::a_legitimate_sixty_four_command_burst_drains_within_the_deadline \
+  -- --exact --nocapture
+```
+
+Five isolated debug-test runs drained a 64-command FIFO burst in 234, 285, 220,
+201 and 249 microseconds (median **234 µs**). The burst contains one command per
+maximum admitted scope connection and is accepted while the cell is deliberately
+paused; command 65 receives typed overload in the adjacent isolation test. This
+is scheduler evidence, not a storage latency SLO. Capacity 64 is therefore the
+initial measured legitimate burst envelope and must be revisited with production
+traffic histograms rather than silently increased.
+
 ## What the numbers say
+
+### Gates 8–10 isolation, SLO and capacity qualification
+
+Re-measured **2026-08-05** on the same Windows workstation. Raw summary:
+[`docs/benchmarks/raw/2026-08-05-gates-8-10.json`](benchmarks/raw/2026-08-05-gates-8-10.json).
+
+```text
+cargo bench -p kboard-ffi --bench scene -- ffi --warm-up-time 1 --measurement-time 3 --noplot
+node scripts/wasm-ffi-benchmark.mjs
+node scripts/room-cell-slo-check.mjs
+node scripts/single-process-capacity-check.mjs
+```
+
+| Workload | Median / p99 | Result |
+|---|---:|---|
+| Native FFI scene, 1,000 elements | 850 µs median | Per-handle path |
+| Two native scenes, serialized | 1.459 ms median | Identical two-call comparison baseline |
+| Two independent native scenes, parallel | 1.168 ms median | 20% lower wall time including thread creation |
+| Wasm FFI scene, 1,000 elements | 944 µs median / 1.714 ms p99 | 100 samples |
+| Eight-scope durable load | 9.496 ms cold cross-scope p99 | Under 250 ms shared-runner objective |
+| 64 simultaneously writing scopes | 31.247 ms cold p99 | Qualified on this debug build/machine |
+| 96 simultaneously writing scopes | bounded overload | Storage mailbox protected the process |
+
+The capacity result is a measured operating envelope, not a universal product
+ceiling. It identifies the single storage writer/64-entry queue as the first
+boundary under a synchronized first wave. ADR-0028 therefore retains one
+process and makes sustained legitimate overload a topology-revisit trigger.
+
+The 250 ms p99 and 1 s maximum CI checks are intentionally wide enough for
+shared hardware. Criterion microbenchmarks remain report-only because shared
+runner timings are not stable enough for a meaningful narrow threshold.
 
 ### The durable write dominates the critical section, and ADR-0007 said otherwise
 

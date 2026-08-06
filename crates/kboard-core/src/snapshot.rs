@@ -28,6 +28,39 @@ pub struct Snapshot {
     absorbed: u64,
 }
 
+/// Immutable materialized state paired with the exact durable log sequence it
+/// includes. The sequence is storage ordering, not the snapshot's HLC horizon.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CapturedSnapshot {
+    snapshot: Snapshot,
+    through_sequence: u64,
+}
+
+impl CapturedSnapshot {
+    pub const fn new(snapshot: Snapshot, through_sequence: u64) -> Self {
+        Self {
+            snapshot,
+            through_sequence,
+        }
+    }
+
+    pub const fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub const fn through_sequence(&self) -> u64 {
+        self.through_sequence
+    }
+
+    pub const fn scope(&self) -> &ScopeId {
+        self.snapshot.scope()
+    }
+
+    pub fn into_snapshot(self) -> Snapshot {
+        self.snapshot
+    }
+}
+
 impl Snapshot {
     pub fn empty(scope: ScopeId) -> Self {
         Self {

@@ -24,6 +24,21 @@ true at the time is what makes the change legible.
 | [0012](0012-host-measured-text.md) | The host measures text; the engine stores the box | Accepted | Text has a size only once you know the font, and the engine has none |
 | [0013](0013-box-and-turn-not-a-matrix.md) | A box and a turn, not a matrix | Accepted | Non-uniform resize of a rotated shape is a shear the model cannot hold |
 | [0014](0014-partial-style-writes.md) | A style write carries only what changed | Accepted | Resending a whole style silently reverts a peer's concurrent restyle |
+| [0015](0015-per-scope-room-cells.md) | One ordered room cell owns each active scope | Accepted | Remove cross-scope head-of-line blocking without losing same-scope ordering |
+| [0016](0016-durable-batch-acknowledgement.md) | Acknowledge durable idempotent batches, not socket sends | Accepted | Make retry and user-visible save state truthful end to end |
+| [0017](0017-exact-snapshot-log-coverage.md) | Persist the exact log sequence captured by a snapshot | Accepted | Prevent asynchronous snapshot work from truncating unseen operations |
+| [0018](0018-replica-identity-and-hlc-trust.md) | Bind operations to stable replicas and governed clocks | Accepted | Close actor forgery, restart collision and future-clock integrity gaps |
+| [0019](0019-u64-actor-c-abi.md) | Carry the engine's u64 actor through the C ABI | Accepted | Remove adapter truncation and support collision-resistant stable actors |
+| [0020](0020-sqlite-schema-recovery-and-checkpoint-policy.md) | Version SQLite and fail closed when recovery is incomplete | Accepted | Prevent partial migrations and silent empty-room recovery |
+| [0021](0021-tombstone-and-offline-replica-horizon.md) | Retain tombstones until causal safety is provable | Accepted | Avoid offline resurrection from timer-based collection |
+| [0022](0022-bounded-fair-storage-writer.md) | Use one bounded FIFO storage writer with one in-flight write per scope | Accepted | Bound SQLite contention without letting a hot room starve cold rooms |
+| [0023](0023-room-cell-directory-lifecycle.md) | Supervise bounded room cells through lifecycle-bearing directory entries | Accepted | Make ordering, overload, restore, drain and failure explicit |
+| [0024](0024-origin-session-and-aggregate-resource-policy.md) | Enforce origin, session expiry and aggregate scope/identity budgets | Accepted | Stop browsers and many connections from multiplying trust and resource authority |
+| [0025](0025-durable-browser-outbox.md) | Persist client batches until matching durable acknowledgement | Accepted | Stop socket close, reload and refusal from silently discarding edits |
+| [0026](0026-per-board-ffi-locks-and-bounded-telemetry.md) | Isolate FFI handles and expose bounded operational telemetry | Accepted | Remove global native-handle contention and make phase costs visible safely |
+| [0027](0027-production-lifecycle-and-recovery.md) | Make readiness, drain, backup and recovery explicit lifecycle states | Accepted | Route and recover from operational truth rather than process-up assumptions |
+| [0028](0028-single-process-topology-and-scale-triggers.md) | Keep one authoritative process until placement and fencing exist | Accepted | Prevent shared-storage split brain and premature service extraction |
+| [0029](0029-immutable-release-candidate.md) | Qualify and promote one commit-addressed artifact set | Accepted | Prevent environment rebuilds from replacing the bits that passed qualification |
 
 ## Not yet recorded
 
@@ -33,7 +48,6 @@ Each should become a record before it becomes load-bearing for someone else:
 - Element ids as `(actor, counter)` rather than random, keeping the engine free
   of an entropy source
 - Fractional z-indexing over integer ordering
-- Tombstone retention and host-driven collection horizons
 - JSON as the wire format, and property keys as strings rather than a derived
   enum representation
 - The growing list of properties with a *read default* that undo depends on —

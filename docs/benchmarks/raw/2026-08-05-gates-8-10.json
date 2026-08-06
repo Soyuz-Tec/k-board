@@ -1,0 +1,39 @@
+{
+  "machine": "Intel Core Ultra 7 255H, Windows 11 Pro",
+  "date": "2026-08-05",
+  "native_ffi_micros": {
+    "scene_1000_median": 850.17,
+    "serialized_two_scene_1000_median": 1458.7,
+    "parallel_independent_two_scene_1000_median": 1168.3
+  },
+  "wasm_ffi_scene_1000_micros": {
+    "median": 943.6,
+    "p95": 1206.5,
+    "p99": 1714.3,
+    "max": 1828.2,
+    "samples": 100,
+    "artifact_bytes": 436380
+  },
+  "room_cell_slo_ms": {
+    "scopes": 8,
+    "hot_commands": 160,
+    "cold_commands_per_scope": 40,
+    "hot_p99": 4.3706,
+    "cold_cross_scope_p99": 9.4957,
+    "cold_max": 9.7538,
+    "objective_p99": 250
+  },
+  "single_process_capacity_ms": {
+    "highest_qualified_simultaneous_scopes": 64,
+    "qualified_cold_p99": 31.2467,
+    "first_failed_phase_scopes": 96,
+    "failure": "bounded storage queue overload"
+  },
+  "recovery_game_day_ms": {
+    "acknowledged_rpo_operations": 0,
+    "backup": 27.5794,
+    "recovery": 154.5261,
+    "backup_bytes": 20480,
+    "verified_scopes": 1
+  }
+}

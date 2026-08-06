@@ -50,6 +50,28 @@ impl StampedOp {
     pub const fn element(&self) -> ElementId {
         self.op.element()
     }
+
+    /// Whether every value carried by this operation is safe to absorb.
+    ///
+    /// Hosts use this at trust boundaries before persistence. The element
+    /// still enforces the same rule on write as defence in depth.
+    pub fn is_valid(&self) -> bool {
+        match &self.op {
+            Op::Set { key, value, .. } => value.is_valid_for(key),
+            Op::Delete { .. } => true,
+        }
+    }
+
+    /// Conservative payload size for host-side aggregate budgets.
+    pub fn estimated_bytes(&self) -> usize {
+        let operation = match &self.op {
+            Op::Set { key, value, .. } => key
+                .estimated_bytes()
+                .saturating_add(value.estimated_bytes()),
+            Op::Delete { .. } => 16,
+        };
+        48_usize.saturating_add(operation)
+    }
 }
 
 /// Apply one operation. Returns `true` if the document changed.
@@ -63,9 +85,14 @@ pub fn apply(document: &mut Document, stamped: &StampedOp) -> bool {
             element,
             key,
             value,
-        } => document
-            .entry(*element)
-            .set(key.clone(), value.clone(), stamped.stamp),
+        } => {
+            // Validate before `entry`: creating an empty element for a refused
+            // property would still consume room capacity and snapshot space.
+            value.is_valid_for(key)
+                && document
+                    .entry(*element)
+                    .set(key.clone(), value.clone(), stamped.stamp)
+        }
         Op::Delete { element } => document.delete(*element, stamped.stamp),
     }
 }
@@ -180,6 +207,44 @@ mod tests {
 
         assert_eq!(apply_all(&mut document, &ops), 0, "replay must be a no-op");
         assert_eq!(document, after_first);
+    }
+
+    #[test]
+    fn semantic_validation_is_available_before_application() {
+        let invalid = StampedOp::new(
+            HlcGenerator::new(ActorId(1)).tick(1_000),
+            Op::Set {
+                element: ElementId(1),
+                key: PropKey::Text,
+                value: PropValue::Text("x".repeat(crate::prop::MAX_TEXT_BYTES + 1)),
+            },
+        );
+        let deletion = StampedOp::new(
+            HlcGenerator::new(ActorId(1)).tick(1_001),
+            Op::Delete {
+                element: ElementId(1),
+            },
+        );
+        let wrong_type = StampedOp::new(
+            HlcGenerator::new(ActorId(1)).tick(1_002),
+            Op::Set {
+                element: ElementId(1),
+                key: PropKey::Deleted,
+                value: PropValue::Text("false".into()),
+            },
+        );
+
+        assert!(!invalid.is_valid());
+        assert!(deletion.is_valid());
+        assert!(!wrong_type.is_valid());
+
+        let mut document = Document::new(scope());
+        assert!(!apply(&mut document, &wrong_type));
+        assert_eq!(
+            document.total_count(),
+            0,
+            "a refused property must not leave an empty element"
+        );
     }
 
     #[test]
