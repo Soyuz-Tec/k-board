@@ -37,6 +37,32 @@ a WebSocket subprotocol rather than a query parameter on the socket URL.
 Open <http://127.0.0.1:8080> in **two tabs**. Each tab is an independent
 replica with its own copy of the document. Draw in either one.
 
+### Embed it in another application
+
+The same client is published as a framework-neutral Web Component and SDK:
+
+```html
+<div id="whiteboard"></div>
+<script type="module">
+  import { KBoard } from "https://board.example.com/embed-sdk.js";
+
+  const board = await KBoard.mount(document.querySelector("#whiteboard"), {
+    baseUrl: "https://board.example.com/",
+    scope: "tenant-42:meeting-9",
+    accessToken: shortLivedScopeGrant,
+  });
+
+  board.addEventListener("status", ({ detail }) => console.log(detail));
+</script>
+```
+
+Configure the exact host origins with
+`KBOARD_EMBEDDING_ORIGINS=https://comms.example.com`. The SDK passes the grant
+through a one-time parent/iframe handshake rather than a URL or DOM attribute.
+The host CSP must allow the SDK origin in `script-src` and `style-src`, and the
+K-board frame origin in `frame-src` and `connect-src` as applicable.
+Run the included host example at <http://127.0.0.1:8080/embed-demo.html>.
+
 ## Why this exists
 
 Existing open-source canvases are excellent drawing surfaces and incomplete
@@ -226,7 +252,6 @@ pixels to be painting for content to be readable.
   a browser — the client-side export above does not cover thumbnails or
   notification previews
 - GPU renderer (`wgpu`/`vello`) with a WebGL2 fallback
-- Framework-agnostic Web Component packaging
 
 **Measured, not yet addressed**
 - `board/scene` costs **10.3 ms** at 10,000 elements, and **20.5 ms** once

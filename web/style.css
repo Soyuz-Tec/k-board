@@ -49,6 +49,11 @@ body {
   margin: 0;
 }
 
+body.embed-mode .brand,
+body.embed-mode #hint {
+  display: none;
+}
+
 body {
   display: flex;
   flex-direction: column;

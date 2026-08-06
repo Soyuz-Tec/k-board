@@ -39,6 +39,7 @@ true at the time is what makes the change legible.
 | [0027](0027-production-lifecycle-and-recovery.md) | Make readiness, drain, backup and recovery explicit lifecycle states | Accepted | Route and recover from operational truth rather than process-up assumptions |
 | [0028](0028-single-process-topology-and-scale-triggers.md) | Keep one authoritative process until placement and fencing exist | Accepted | Prevent shared-storage split brain and premature service extraction |
 | [0029](0029-immutable-release-candidate.md) | Qualify and promote one commit-addressed artifact set | Accepted | Prevent environment rebuilds from replacing the bits that passed qualification |
+| [0030](0030-standalone-and-embedded-web-delivery.md) | Deliver one web client through standalone and Embedded SDK shells | Accepted | Prevent product-mode drift while keeping host integration explicit and independently deployable |
 
 ## Not yet recorded
 

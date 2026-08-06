@@ -37,6 +37,9 @@ jobs:
       - name: Durable client outbox
         run: node scripts/client-outbox-check.mjs
 
+      - name: Standalone and Embedded SDK contract
+        run: node scripts/embed-sdk-check.mjs
+
       - name: Review-size advisory
         run: node scripts/review-size-report.mjs
 
@@ -213,7 +216,7 @@ jobs:
           cp target/release/kboard-server "$bundle/"
           cp target/release/libkboard.so target/release/libkboard.a "$bundle/"
           cp target/wasm32-unknown-unknown/release/kboard.wasm "$bundle/"
-          cp web/*.js web/index.html "$bundle/web/"
+          cp web/*.js web/*.mjs web/*.html web/*.css "$bundle/web/"
           cp README.md LICENSE "$bundle/"
           (cd "$bundle" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 
@@ -235,6 +238,10 @@ jobs:
           done
           curl -sf http://127.0.0.1:8180/health/ready | grep -q '"status":"ready"'
           curl -sf http://127.0.0.1:8180/kboard.wasm >/dev/null
+          curl -sf http://127.0.0.1:8180/embed >/dev/null
+          curl -sf http://127.0.0.1:8180/embed-sdk.js >/dev/null
+          curl -sf http://127.0.0.1:8180/embed-demo.html >/dev/null
+          test "$(curl -sI http://127.0.0.1:8180/embed-sdk.js | tr -d '\r' | awk -F': ' 'tolower($1)=="access-control-allow-origin" {print $2}')" = "*"
 
       - name: Upload immutable release candidate
         uses: actions/upload-artifact@v4

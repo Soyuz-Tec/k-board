@@ -64,7 +64,9 @@ use crate::protocol::{
 };
 use crate::room::{Fanout, Refused};
 use crate::room_cell::{CellError, CommitOutcome, CommitRequest};
-use crate::security::{scope_correlation, AdmissionControl, AdmissionError, OriginPolicy};
+use crate::security::{
+    scope_correlation, AdmissionControl, AdmissionError, EmbeddingPolicy, OriginPolicy,
+};
 use crate::storage_writer::StorageWriter;
 
 #[derive(Clone)]
@@ -76,6 +78,7 @@ struct AppState {
     wasm_path: PathBuf,
     authority: Arc<Authority>,
     origin: OriginPolicy,
+    embedding: EmbeddingPolicy,
     accepting: Arc<AtomicBool>,
     persistent_database: bool,
 }
@@ -296,6 +299,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let embedding = match EmbeddingPolicy::from_env() {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("k-board: invalid embedding origin policy: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Durability is always on; whether it survives the process depends on
     // whether a path was given. One code path either way, so the in-memory
@@ -333,6 +343,7 @@ async fn main() {
         wasm_path,
         authority: Arc::new(authority),
         origin,
+        embedding,
         accepting: Arc::new(AtomicBool::new(true)),
         persistent_database: database.is_some(),
     };
@@ -341,6 +352,7 @@ async fn main() {
 
     let static_files =
         ServeDir::new(&web_root).not_found_service(ServeFile::new(web_root.join("index.html")));
+    let embedded_shell = ServeFile::new(web_root.join("index.html"));
 
     let app = Router::new()
         .route("/ws/{scope}", get(websocket))
@@ -352,8 +364,12 @@ async fn main() {
         .route("/api/storage/health", get(storage_health))
         .route("/api/directory/health", get(directory_health))
         .route("/api/rooms/{scope}/stats", get(room_stats))
+        .route_service("/embed", embedded_shell)
         .fallback_service(static_files)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .with_state(state.clone());
 
     let address = SocketAddr::new(bind, port);
@@ -414,33 +430,56 @@ async fn shutdown(directory: ScopeDirectory, storage: StorageWriter, accepting: 
 
 /// Conservative defaults for a page that loads wasm and opens a WebSocket.
 ///
-/// `frame-ancestors 'none'` blocks embedding this *demo* server in an iframe.
-/// A host embedding the canvas serves the client itself and sets its own policy;
-/// nothing here should make that decision for them.
-async fn security_headers(request: Request, next: Next) -> Response {
+/// The standalone shell is never frameable. Only the explicit embedded shell
+/// uses the configured exact frame-ancestor policy.
+async fn security_headers(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let embedded_shell = path == "/embed";
+    let public_embed_asset = matches!(
+        path,
+        "/embed-sdk.js" | "/embed-contract.mjs" | "/embed-element.css"
+    );
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if !embedded_shell {
+        headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    if public_embed_asset {
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("cross-origin"),
+        );
+    }
+    let frame_ancestors = if embedded_shell {
+        state.embedding.frame_ancestors()
+    } else {
+        "'none'".to_owned()
+    };
+    let policy = format!(
+        "default-src 'self'; \
+         script-src 'self' 'wasm-unsafe-eval'; \
+         style-src 'self'; \
+         img-src 'self' data:; \
+         connect-src 'self' ws: wss:; \
+         base-uri 'none'; \
+         object-src 'none'; \
+         frame-ancestors {frame_ancestors}"
+    );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; \
-             script-src 'self' 'wasm-unsafe-eval'; \
-             style-src 'self'; \
-             img-src 'self' data:; \
-             connect-src 'self' ws: wss:; \
-             base-uri 'none'; \
-             object-src 'none'; \
-             frame-ancestors 'none'",
-        ),
+        HeaderValue::from_str(&policy).expect("validated origins produce a valid CSP"),
     );
     response
 }

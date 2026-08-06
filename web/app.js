@@ -22,6 +22,9 @@ import * as transform from "./transform.js";
 import { Presence, drawCursors, peerName } from "./presence.js";
 import * as clipboard from "./clipboard.js";
 import { OutboxLimitError, createClientOutbox } from "./outbox.js";
+import { resolveRuntimeConfiguration } from "./runtime-config.js";
+
+const runtime = await resolveRuntimeConfiguration();
 
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
@@ -37,29 +40,15 @@ const redoButton = document.getElementById("redo");
 const pngButton = document.getElementById("exportPng");
 const svgButton = document.getElementById("exportSvg");
 const recoveryButton = document.getElementById("exportRecovery");
+const openStandaloneButton = document.getElementById("openStandalone");
 
 const COMMIT_INTERVAL_MS = 50; // live-drag update rate sent to peers
-
-// A query bearer is a bootstrap compatibility surface, never durable browser
-// state. Capture it once, then remove it before another navigation, screenshot
-// or history inspection can retain it. The WebSocket still carries it only as
-// a subprotocol.
-const bootstrapUrl = new URL(location.href);
-const bootstrapToken = bootstrapUrl.searchParams.get("token");
-if (bootstrapToken !== null) {
-  bootstrapUrl.searchParams.delete("token");
-  history.replaceState(
-    null,
-    "",
-    `${bootstrapUrl.pathname}${bootstrapUrl.search}${bootstrapUrl.hash}`,
-  );
-}
 
 const state = {
   engine: null,
   board: null,
   actor: null,
-  scope: location.hash.slice(1) || "demo",
+  scope: runtime.scope,
   tool: "select",
   colour: "#1e1e1e",
   fill: "none",
@@ -70,7 +59,7 @@ const state = {
   draft: null,
   pan: null,
   socket: null,
-  bootstrapToken,
+  bootstrapToken: runtime.accessToken,
   outbox: null,
   replica: null,
   negotiated: false,
@@ -538,6 +527,7 @@ function describeItem(item) {
 function setStatus(kind, text) {
   statusDot.className = `dot ${kind}`;
   statusText.textContent = text;
+  runtime.bridge?.emit("status", { kind, text });
 }
 
 function ensureBoard(actor) {
@@ -636,14 +626,14 @@ function flush() {
 }
 
 function connect() {
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${protocol}://${location.host}/ws/${encodeURIComponent(state.scope)}`;
+  const url = new URL(`ws/${encodeURIComponent(state.scope)}`, runtime.baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   // Offered as a subprotocol rather than a query parameter: a URL ends up in
   // server logs, browser history, and referrers. An open server ignores it.
   const token = state.bootstrapToken;
   const socket = token
-    ? new WebSocket(url, ["kboard.v2", `kboard.token.${token}`])
-    : new WebSocket(url, ["kboard.v2"]);
+    ? new WebSocket(url.href, ["kboard.v2", `kboard.token.${token}`])
+    : new WebSocket(url.href, ["kboard.v2"]);
   state.socket = socket;
   state.negotiated = false;
   setStatus("", "connecting");
@@ -1338,6 +1328,25 @@ redoButton.addEventListener("click", () => stepHistory(false));
 pngButton.addEventListener("click", exportPng);
 svgButton.addEventListener("click", exportSvg);
 recoveryButton.addEventListener("click", exportRecovery);
+openStandaloneButton.addEventListener("click", () => {
+  runtime.bridge?.emit("openStandalone", { scope: state.scope });
+});
+
+if (runtime.mode === "embedded") {
+  document.body.classList.add("embed-mode");
+  openStandaloneButton.hidden = false;
+  hint.classList.add("gone");
+  runtime.bridge.handle("focus", () => {
+    canvas.focus();
+    return { focused: true };
+  });
+  runtime.bridge.handle("flush", async () => {
+    flush();
+    await state.captureChain;
+    const summary = outboxSummary();
+    return { pending: summary.pending + summary.sending };
+  });
+}
 
 document.getElementById("clear").addEventListener("click", () => {
   if (state.board === null) return;
@@ -1433,17 +1442,22 @@ window.addEventListener("keydown", (event) => {
   if (tool) selectTool(tool);
 });
 
-window.addEventListener("hashchange", () => location.reload());
+if (runtime.mode === "standalone") {
+  window.addEventListener("hashchange", () => location.reload());
+}
 window.addEventListener("resize", invalidate);
 
 // -- start -----------------------------------------------------------------
 
 (async function start() {
-  if (!location.hash) history.replaceState(null, "", `#${state.scope}`);
+  if (runtime.mode === "standalone" && !location.hash) {
+    history.replaceState(null, "", `#${state.scope}`);
+  }
   try {
     state.engine = await loadEngine("./kboard.wasm");
   } catch (error) {
     setStatus("offline", "engine failed to load");
+    runtime.bridge?.emit("error", { message: "engine failed to load" });
     hint.textContent = "Build the engine: cargo build -p kboard-ffi --target wasm32-unknown-unknown --release";
     hint.classList.remove("gone");
     console.error(error);
@@ -1466,4 +1480,9 @@ window.addEventListener("resize", invalidate);
   connect();
 
   requestAnimationFrame(frame);
+  runtime.bridge?.emit("ready", {
+    scope: state.scope,
+    mode: runtime.mode,
+    status: statusText.textContent,
+  });
 })();

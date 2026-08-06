@@ -14,6 +14,11 @@ pub struct OriginPolicy {
     allowed: Arc<HashSet<String>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct EmbeddingPolicy {
+    origins: Arc<Vec<String>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OriginDenied {
     Malformed,
@@ -61,6 +66,33 @@ impl OriginPolicy {
         } else {
             Err(OriginDenied::NotAllowed)
         }
+    }
+}
+
+impl EmbeddingPolicy {
+    pub fn from_env() -> Result<Self, &'static str> {
+        Self::from_configured(&std::env::var("KBOARD_EMBEDDING_ORIGINS").unwrap_or_default())
+    }
+
+    fn from_configured(configured: &str) -> Result<Self, &'static str> {
+        let mut origins = configured
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(normalize_origin)
+            .collect::<Result<Vec<_>, _>>()?;
+        origins.sort();
+        origins.dedup();
+        Ok(Self {
+            origins: Arc::new(origins),
+        })
+    }
+
+    pub fn frame_ancestors(&self) -> String {
+        std::iter::once("'self'")
+            .chain(self.origins.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -303,6 +335,20 @@ mod tests {
         assert_eq!(policy.check(&headers), Err(OriginDenied::NotAllowed));
         headers.insert(header::ORIGIN, "https://board.example".parse().unwrap());
         assert_eq!(policy.check(&headers), Ok(()));
+    }
+
+    #[test]
+    fn embedding_policy_is_exact_deduplicated_and_never_wildcarded() {
+        let policy = EmbeddingPolicy::from_configured(
+            "https://comms.example, http://localhost:4000, https://COMMS.example/",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.frame_ancestors(),
+            "'self' http://localhost:4000 https://comms.example"
+        );
+        assert!(EmbeddingPolicy::from_configured("*").is_err());
+        assert!(EmbeddingPolicy::from_configured("https://example.com/path").is_err());
     }
 
     #[test]
